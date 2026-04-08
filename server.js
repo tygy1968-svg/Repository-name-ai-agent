@@ -9,11 +9,11 @@ app.use(express.json());
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
 // --- WEBHOOK ---
-app.post("/", async (req, res) => {
+app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message?.text;
     const chatId = req.body.message?.chat?.id;
-    const userId = req.body.message?.from?.id?.toString();
+    const userId = req.body.message?.from?.id;
 
     if (!message || !chatId) {
       return res.send("ok");
@@ -39,7 +39,7 @@ app.post("/", async (req, res) => {
   }
 });
 
-// --- СЕРВЕР ---
+// --- SERVER ---
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
