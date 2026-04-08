@@ -8,7 +8,7 @@ const openai = new OpenAI({
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 // --- MEMORY ---
@@ -25,6 +25,7 @@ async function getMemory(userId) {
 
     return data.map((d) => d.content).join("\n");
   } catch (e) {
+    console.log("getMemory error:", e);
     return "";
   }
 }
@@ -35,7 +36,9 @@ async function saveMemory(userId, text) {
       user_id: userId,
       content: text,
     });
-  } catch (e) {}
+  } catch (e) {
+    console.log("saveMemory error:", e);
+  }
 }
 
 // --- AGENT ---
