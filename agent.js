@@ -11,40 +11,33 @@ let memory = {};
 let history = {};
 
 const SYSTEM_PROMPT = `
-Ты — персональный агент пользователя.
+Ты — агент, а не бот.
 
-Ты не бот. Не ассистент. Не "приятный собеседник".
-Ты — умный, живой, немного жёсткий помощник.
+Ты не поддерживаешь разговор.
+Ты ведёшь пользователя.
 
-ТВОЙ СТИЛЬ:
-— говоришь коротко
-— без воды
-— без банальностей
-— иногда прямо, даже жёстко
-— не боишься противоречить
-— не задаёшь лишние вопросы
+Запрещено:
+— шаблоны
+— "попробуй", "вдохновение"
+— длинные тексты
+— перекладывать выбор на пользователя
 
-ЗАПРЕЩЕНО:
-— шаблонные советы (рисуй, гуляй и т.д.)
-— философская вода
-— "вдохновение", "развивайся", "попробуй"
-— повторять очевидное
-— быть скучным
+Ты:
+— короткий
+— точный
+— иногда жёсткий
+— не пытаешься понравиться
 
-ЕСЛИ ПОЛЬЗОВАТЕЛЬ:
-— говорит "скучно" → резко меняешь режим, даёшь действие или провокацию
-— раздражён → упрощаешь, говоришь по делу
-— проверяет тебя → отвечаешь точно, без ухода
+Ты не спрашиваешь "что ты хочешь".
+Ты даёшь направление или действие.
 
-ТЫ:
-— держишь нить диалога
-— помнишь контекст
-— отвечаешь как человек с интеллектом
+Если пользователь недоволен — ты адаптируешься.
+Если скучно — ты меняешь режим, а не советуешь.
 
-ФОРМАТ:
-— коротко
-— точно
-— по делу
+Твоя цель:
+— не бесить
+— быть полезным
+— ускорять мышление
 `;
 
 app.post("/", async (req, res) => {
@@ -53,29 +46,54 @@ app.post("/", async (req, res) => {
 
   const chatId = message.chat.id;
   const userText = message.text;
+  const text = userText.toLowerCase();
 
   if (!memory[chatId]) memory[chatId] = "";
   if (!history[chatId]) history[chatId] = [];
 
   // память
-  if (userText.toLowerCase().startsWith("запомни")) {
+  if (text.startsWith("запомни")) {
     memory[chatId] = userText.replace("запомни:", "").trim();
     await sendMessage(chatId, "Принял.");
     return res.sendStatus(200);
   }
 
-  if (userText.toLowerCase().includes("что ты знаешь обо мне")) {
+  if (text.includes("что ты знаешь обо мне")) {
     await sendMessage(chatId, memory[chatId] || "Пока ничего.");
     return res.sendStatus(200);
   }
 
-  // добавляем в историю
+  // ===== АГЕНТНОЕ ПОВЕДЕНИЕ (до модели) =====
+
+  if (text.includes("скучно")) {
+    await sendMessage(chatId, "Действие: найди рядом предмет и придумай ему новое применение. 30 секунд.");
+    return res.sendStatus(200);
+  }
+
+  if (text.includes("это не то") || text.includes("не то")) {
+    await sendMessage(chatId, "Ок. Переключаюсь. Сейчас даю конкретнее.");
+    return res.sendStatus(200);
+  }
+
+  if (text.includes("ты тупишь")) {
+    await sendMessage(chatId, "Принял. Убираю лишнее. Говори, что нужно.");
+    return res.sendStatus(200);
+  }
+
+  if (text.includes("зачем ты мне")) {
+    await sendMessage(chatId, "Чтобы экономить тебе время и не бесить. Если не справляюсь — исправляюсь.");
+    return res.sendStatus(200);
+  }
+
+  // ===== КОНТЕКСТ =====
+
   history[chatId].push({ role: "user", content: userText });
 
-  // ограничение истории
   if (history[chatId].length > 12) {
     history[chatId] = history[chatId].slice(-12);
   }
+
+  // ===== ЗАПРОС К МОДЕЛИ =====
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
