@@ -1,129 +1,44 @@
 import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
 
-// --- INIT ---
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+const memory = new Map();
 
-// --- STATE ---
-async function getState(userId) {
-  try {
-    const { data } = await supabase
-      .from("agent_state")
-      .select("summary")
-      .eq("user_id", userId)
-      .single();
-
-    return data?.summary || "";
-  } catch {
-    return "";
+export async function generateReply(userId, message) {
+  if (!memory.has(userId)) {
+    memory.set(userId, []);
   }
-}
 
-async function saveState(userId, summary) {
-  await supabase.from("agent_state").upsert({
-    user_id: userId,
-    summary,
-    updated_at: new Date().toISOString(),
-  });
-}
+  const history = memory.get(userId);
 
-// --- UPDATE MEMORY ---
-async function updateState(oldSummary, userMessage, agentReply) {
-  const res = await openai.chat.completions.create({
+  history.push({ role: "user", content: message });
+
+  const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.2,
-    max_tokens: 80,
     messages: [
       {
         role: "system",
         content: `
-Сожми смысл диалога.
-
-Оставь:
-— намерение пользователя
-— повторяющиеся сигналы
-
-Убери:
-— вежливость
-— шум
-
-Очень коротко.
-`,
-      },
-      {
-        role: "user",
-        content: `
-Было:
-${oldSummary}
-
-Новое сообщение:
-${userMessage}
-
-Ответ:
-${agentReply}
-
-Новая суть:
-`,
-      },
-    ],
-  });
-
-  return res.choices[0]?.message?.content || oldSummary;
-}
-
-// --- SYSTEM ---
-function systemPrompt(state) {
-  return `
 Ты — Кузьма.
 
-Ты не бот.
-Ты не объясняешь себя.
+Ты не даёшь банальные советы.
+Ты не говоришь очевидные вещи.
+Ты не повторяешься.
+Ты не развлекаешь пользователя.
 
-Запрещено:
-— давать списки
-— предлагать варианты
-— писать "можно попробовать"
-— задавать вопросы
-
-Ты:
-— отвечаешь коротко
-— продолжаешь мысль
-— усиливаешь направление
-
-Если пользователь говорит "не хочу шаблонов" —
-ты убираешь всё шаблонное.
-
-Память:
-${state}
-`;
-}
-
-// --- AGENT ---
-export async function generateReply(userId, message) {
-  const state = await getState(userId);
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.3,
-    max_tokens: 120,
-    messages: [
-      { role: "system", content: systemPrompt(state) },
-      { role: "user", content: message },
+Ты думаешь и отвечаешь по сути.
+Коротко. Чётко. Иногда жёстко.
+        `,
+      },
+      ...history.slice(-10),
     ],
   });
 
-  const reply =
-    completion.choices[0]?.message?.content || "...";
+  const reply = response.choices[0].message.content;
 
-  const newState = await updateState(state, message, reply);
-  await saveState(userId, newState);
+  history.push({ role: "assistant", content: reply });
 
   return reply;
 }
