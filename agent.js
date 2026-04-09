@@ -1,63 +1,120 @@
-import OpenAI from "openai";
+import express from "express";
+import fetch from "node-fetch";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const app = express();
+app.use(express.json());
 
-const memory = new Map();
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-export async function generateReply(userId, message) {
-  if (!memory.has(userId)) {
-    memory.set(userId, {
-      facts: [],
-      history: [],
-    });
+let memory = {};
+let history = {};
+
+const SYSTEM_PROMPT = `
+Ты — персональный агент пользователя.
+
+Ты не бот. Не ассистент. Не "приятный собеседник".
+Ты — умный, живой, немного жёсткий помощник.
+
+ТВОЙ СТИЛЬ:
+— говоришь коротко
+— без воды
+— без банальностей
+— иногда прямо, даже жёстко
+— не боишься противоречить
+— не задаёшь лишние вопросы
+
+ЗАПРЕЩЕНО:
+— шаблонные советы (рисуй, гуляй и т.д.)
+— философская вода
+— "вдохновение", "развивайся", "попробуй"
+— повторять очевидное
+— быть скучным
+
+ЕСЛИ ПОЛЬЗОВАТЕЛЬ:
+— говорит "скучно" → резко меняешь режим, даёшь действие или провокацию
+— раздражён → упрощаешь, говоришь по делу
+— проверяет тебя → отвечаешь точно, без ухода
+
+ТЫ:
+— держишь нить диалога
+— помнишь контекст
+— отвечаешь как человек с интеллектом
+
+ФОРМАТ:
+— коротко
+— точно
+— по делу
+`;
+
+app.post("/", async (req, res) => {
+  const message = req.body.message;
+  if (!message) return res.sendStatus(200);
+
+  const chatId = message.chat.id;
+  const userText = message.text;
+
+  if (!memory[chatId]) memory[chatId] = "";
+  if (!history[chatId]) history[chatId] = [];
+
+  // память
+  if (userText.toLowerCase().startsWith("запомни")) {
+    memory[chatId] = userText.replace("запомни:", "").trim();
+    await sendMessage(chatId, "Принял.");
+    return res.sendStatus(200);
   }
 
-  const user = memory.get(userId);
-
-  // --- СОХРАНЕНИЕ ---
-  if (message.toLowerCase().includes("запомни")) {
-    const fact = message.replace("запомни:", "").trim();
-    user.facts.push(fact);
-    return "Записал.";
+  if (userText.toLowerCase().includes("что ты знаешь обо мне")) {
+    await sendMessage(chatId, memory[chatId] || "Пока ничего.");
+    return res.sendStatus(200);
   }
 
-  // --- ВЫДАЧА ПАМЯТИ ---
-  if (message.toLowerCase().includes("что ты знаешь")) {
-    if (user.facts.length === 0) {
-      return "Пока ничего.";
-    }
-    return "Я знаю: " + user.facts.join("; ");
+  // добавляем в историю
+  history[chatId].push({ role: "user", content: userText });
+
+  // ограничение истории
+  if (history[chatId].length > 12) {
+    history[chatId] = history[chatId].slice(-12);
   }
 
-  // --- ОБЫЧНЫЙ РЕЖИМ ---
-  user.history.push({ role: "user", content: message });
-
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `
-Ты — Кузьма.
-
-Ты не даёшь банальные советы.
-Ты не ведёшь себя как психолог.
-Ты не задаёшь лишних вопросов.
-Говоришь по делу и держишь линию.
-
-Если пользователь говорит глупость — поправляешь.
-Если мысль слабая — усиливаешь.
-        `,
-      },
-      ...user.history.slice(-10),
-    ],
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: "Память: " + memory[chatId] },
+        ...history[chatId]
+      ],
+      temperature: 0.8
+    })
   });
 
-  const reply = response.choices[0].message.content;
+  const data = await response.json();
+  const reply = data.choices?.[0]?.message?.content || "Ошибка";
 
-  user.history.push({ role: "assistant", content: reply });
+  history[chatId].push({ role: "assistant", content: reply });
 
-  return reply;
+  await sendMessage(chatId, reply);
+
+  res.sendStatus(200);
+});
+
+async function sendMessage(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text
+    })
+  });
 }
+
+app.listen(10000, () => {
+  console.log("Agent started on port 10000");
+});
