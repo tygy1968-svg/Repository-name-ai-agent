@@ -25,9 +25,11 @@ async function sendMessage(chatId, text) {
 }
 
 // === MEMORY ===
-async function getMemory(userId) {
+
+// 🔥 ЧИТАЕМ БЕЗ user_id (чтобы точно видеть память)
+async function getMemory() {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=20`,
+    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=20`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -40,7 +42,8 @@ async function getMemory(userId) {
   return data.map(x => x.content).join("\n");
 }
 
-async function saveMemory(userId, content) {
+// 🔥 ПИШЕМ ПРОСТО В content
+async function saveMemory(content) {
   await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
@@ -50,7 +53,6 @@ async function saveMemory(userId, content) {
     },
     body: JSON.stringify([
       {
-        user_id: userId,
         content: content
       }
     ])
@@ -63,27 +65,26 @@ app.post("/webhook", async (req, res) => {
   if (!message) return res.sendStatus(200);
 
   const chatId = message.chat.id;
-  const userId = message.from.id;
   const text = message.text || "";
-
   const lower = text.toLowerCase();
 
-  // === ЖЁСТКАЯ ЛОГИКА ===
+  // === ЗАПОМНИ ===
   if (lower.includes("запомни")) {
     const clean = text.replace("запомни:", "").trim();
-    await saveMemory(userId, clean);
+    await saveMemory(clean);
     await sendMessage(chatId, "Сохранено.");
     return res.sendStatus(200);
   }
 
+  // === ЧТО ТЫ ЗНАЕШЬ ===
   if (lower.includes("что ты знаешь")) {
-    const memory = await getMemory(userId);
+    const memory = await getMemory();
     await sendMessage(chatId, memory || "Пока ничего.");
     return res.sendStatus(200);
   }
 
   // === ПАМЯТЬ ===
-  const memory = await getMemory(userId);
+  const memory = await getMemory();
   const now = new Date().toISOString();
 
   // === МОДЕЛЬ ===
