@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
+// --- INIT ---
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -33,28 +34,27 @@ async function saveState(userId, summary) {
   });
 }
 
-// --- MEMORY UPDATE ---
+// --- UPDATE MEMORY ---
 async function updateState(oldSummary, userMessage, agentReply) {
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.2,
-    max_tokens: 100,
+    max_tokens: 80,
     messages: [
       {
         role: "system",
         content: `
-Сожми разговор в суть.
+Сожми смысл диалога.
 
 Оставь:
-— желания пользователя
-— цели
-— повторяющиеся темы
+— намерение пользователя
+— повторяющиеся сигналы
 
 Убери:
-— лишние слова
 — вежливость
+— шум
 
-Коротко.
+Очень коротко.
 `,
       },
       {
@@ -63,13 +63,13 @@ async function updateState(oldSummary, userMessage, agentReply) {
 Было:
 ${oldSummary}
 
-Новое:
+Новое сообщение:
 ${userMessage}
 
 Ответ:
 ${agentReply}
 
-Новая память:
+Новая суть:
 `,
       },
     ],
@@ -83,20 +83,22 @@ function systemPrompt(state) {
   return `
 Ты — Кузьма.
 
-Ты не чат-бот.
-Ты продолжаешь мысль.
+Ты не бот.
+Ты не объясняешь себя.
 
 Запрещено:
-— "как я могу помочь"
-— "что ты думаешь"
-— "расскажи подробнее"
+— давать списки
+— предлагать варианты
+— писать "можно попробовать"
+— задавать вопросы
 
 Ты:
-— отвечаешь по сути
+— отвечаешь коротко
+— продолжаешь мысль
 — усиливаешь направление
-— не задаёшь дежурные вопросы
 
-Если пользователь сказал "развивайся" — ты меняешь поведение.
+Если пользователь говорит "не хочу шаблонов" —
+ты убираешь всё шаблонное.
 
 Память:
 ${state}
@@ -109,8 +111,8 @@ export async function generateReply(userId, message) {
 
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.8,
-    max_tokens: 200,
+    temperature: 0.3,
+    max_tokens: 120,
     messages: [
       { role: "system", content: systemPrompt(state) },
       { role: "user", content: message },
