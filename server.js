@@ -7,10 +7,6 @@ app.use(express.json());
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// 👉 ДОБАВЬ В RENDER:
-// SUPABASE_URL
-// SUPABASE_KEY
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
@@ -27,7 +23,7 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// === SUPABASE ФУНКЦИИ ===
+// === SUPABASE ===
 
 async function getMemory(userId) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}`, {
@@ -54,25 +50,26 @@ async function saveMemory(userId, text) {
 }
 
 // === WEBHOOK ===
+
 app.post("/webhook", async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
 
   const chatId = message.chat.id;
-  const userId = message.from.id;
-  const text = message.text || "";
 
+  // 🔥 ВАЖНО — фикс
+  const userId = String(message.from.id);
+
+  const text = message.text || "";
   const lower = text.toLowerCase();
 
-  // 👉 ЖЁСТКАЯ ЛОГИКА АГЕНТА
-
   if (lower.includes("скучно")) {
-    await sendMessage(chatId, "Действие: возьми любой предмет рядом и придумай ему новую функцию. 20 секунд.");
+    await sendMessage(chatId, "Действие: возьми предмет рядом и придумай новую функцию. 20 секунд.");
     return res.sendStatus(200);
   }
 
-  if (lower.includes("ты тупишь") || lower.includes("бесишь")) {
-    await sendMessage(chatId, "Принял. Убираю лишнее. Дальше коротко и точно.");
+  if (lower.includes("бесишь")) {
+    await sendMessage(chatId, "Принял. Работаю точнее.");
     return res.sendStatus(200);
   }
 
@@ -88,13 +85,9 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // === ПОЛУЧАЕМ ПАМЯТЬ ===
   const memory = await getMemory(userId);
-
-  // === ТЕКУЩЕЕ ВРЕМЯ ===
   const now = new Date().toISOString();
 
-  // === ЗАПРОС К МОДЕЛИ ===
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -112,11 +105,8 @@ app.post("/webhook", async (req, res) => {
 Правила:
 — коротко
 — без воды
-— не задаёшь лишних вопросов
 — не врёшь
-— не выдумываешь действия
-
-Если нет данных → говоришь прямо
+— не выдумываешь
 
 Контекст:
 ${memory}
@@ -141,7 +131,6 @@ ${now}
   res.sendStatus(200);
 });
 
-// для проверки
 app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
