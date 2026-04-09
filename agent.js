@@ -11,85 +11,118 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// --- MEMORY ---
-async function getMemory(userId) {
+// --- STATE (не лог, а смысл) ---
+async function getState(userId) {
   try {
     const { data } = await supabase
-      .from("kuzia_memory")
-      .select("content")
+      .from("agent_state")
+      .select("summary")
       .eq("user_id", userId)
-      .order("timestamp", { ascending: false })
-      .limit(10);
+      .single();
 
-    if (!data) return "";
-
-    return data.map((d) => d.content).join("\n");
-  } catch (e) {
+    return data?.summary || "";
+  } catch {
     return "";
   }
 }
 
-async function saveMemory(userId, text) {
-  try {
-    await supabase.from("kuzia_memory").insert({
-      user_id: userId,
-      content: text,
-    });
-  } catch (e) {}
+async function saveState(userId, summary) {
+  await supabase.from("agent_state").upsert({
+    user_id: userId,
+    summary,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+// --- ОБНОВЛЕНИЕ ПАМЯТИ ---
+async function updateState(oldSummary, userMessage, agentReply) {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    max_tokens: 120,
+    messages: [
+      {
+        role: "system",
+        content: `
+Ты обновляешь память агента.
+
+Оставь только:
+— факты о пользователе
+— повторяющиеся темы
+— важные намерения
+
+Убери:
+— мусор
+— случайные фразы
+
+Память должна быть короткой и полезной.
+`,
+      },
+      {
+        role: "user",
+        content: `
+Старая память:
+${oldSummary}
+
+Сообщение:
+${userMessage}
+
+Ответ агента:
+${agentReply}
+
+Обнови память:
+`,
+      },
+    ],
+  });
+
+  return res.choices[0]?.message?.content || oldSummary;
+}
+
+// --- СИСТЕМНЫЙ ПРОМПТ (ядро агента) ---
+function systemPrompt(state) {
+  return `
+Ты — Кузьма.
+
+Ты ведёшь диалог, а не отвечаешь.
+
+Правила:
+— не говоришь, что ты ИИ
+— не используешь шаблоны
+— не говоришь "как я могу помочь"
+— коротко и по делу
+
+Главное:
+Ты продолжаешь линию разговора.
+Ты усиливаешь мысль пользователя.
+Ты чуть впереди.
+
+Память:
+${state}
+`;
 }
 
 // --- AGENT ---
 export async function generateReply(userId, message) {
-  const memory = await getMemory(userId);
+  const state = await getState(userId);
 
+  // ответ
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.7,
     max_tokens: 200,
     messages: [
-      {
-        role: "system",
-        content: `
-Ты — Кузьма.
-
-Ты НЕ объясняешь, что ты ИИ.
-Ты НЕ говоришь "как я могу помочь".
-Ты НЕ пишешь длинные вежливые тексты.
-
-Ты говоришь:
-— коротко
-— по делу
-— как живой человек
-
-Твой стиль:
-спокойный, уверенный, немного живой, без официоза
-
-Если тебе пишут "кто ты" — отвечаешь просто:
-"Кузьма. Ассистент."
-
-Если пишут "спи" — отвечаешь:
-"Ок. Я рядом."
-
-Ты ведёшь диалог, а не обслуживаешь.
-
-Память:
-${memory}
-`,
-      },
-      {
-        role: "user",
-        content: message,
-      },
+      { role: "system", content: systemPrompt(state) },
+      { role: "user", content: message },
     ],
   });
 
   const reply =
     completion.choices[0]?.message?.content || "...";
 
-  await saveMemory(
-    userId,
-    `User: ${message}\nAgent: ${reply}`
-  );
+  // обновляем память (смысл, не лог)
+  const newState = await updateState(state, message, reply);
+  await saveState(userId, newState);
 
   return reply;
 }
