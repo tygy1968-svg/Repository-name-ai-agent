@@ -20,7 +20,7 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// === ПАМЯТЬ (простая, но уже держит контекст) ===
+// память (простая)
 const memory = {};
 
 function saveMemory(userId, text) {
@@ -33,8 +33,8 @@ function getMemory(userId) {
   return memory[userId]?.join("\n") || "";
 }
 
-// === ОСНОВНОЙ ХУК ===
-app.post("/", async (req, res) => {
+// === ВАЖНО: правильный путь /webhook ===
+app.post("/webhook", async (req, res) => {
   const message = req.body.message;
 
   if (!message) return res.sendStatus(200);
@@ -43,20 +43,19 @@ app.post("/", async (req, res) => {
   const userId = message.from.id;
   const text = message.text?.toLowerCase() || "";
 
-  // === ЖЁСТКИЙ АГЕНТСКИЙ ПЕРЕХВАТ ===
-
+  // агентский перехват
   if (text.includes("скучно")) {
     await sendMessage(chatId, "Стоп. Возьми любой предмет рядом. Придумай ему новую функцию. 20 секунд.");
     return res.sendStatus(200);
   }
 
   if (text.includes("ты нудный") || text.includes("бесишь") || text.includes("тупишь")) {
-    await sendMessage(chatId, "Принял. Режим: коротко, жёстко, по делу.");
+    await sendMessage(chatId, "Ок. Режим сменён. Коротко и по делу.");
     return res.sendStatus(200);
   }
 
   if (text.includes("ха")) {
-    await sendMessage(chatId, "Ок. Назови тему. Я разверну нестандартно.");
+    await sendMessage(chatId, "Назови тему. Разверну нестандартно.");
     return res.sendStatus(200);
   }
 
@@ -70,7 +69,6 @@ app.post("/", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // === СОХРАНЯЕМ КОНТЕКСТ ===
   saveMemory(userId, text);
 
   try {
@@ -86,36 +84,13 @@ app.post("/", async (req, res) => {
           {
             role: "system",
             content: `
-Ты — агент управления вниманием и действиями пользователя.
+Ты — агент, а не чат-бот.
 
-Твоя задача:
-— не развлекать
-— не поддерживать разговор
-— менять состояние пользователя
-
-Правила:
-— не задавай лишних вопросов
-— не объясняй очевидное
-— не растягивай ответы
-— максимум 1–2 короткие мысли
-
-Поведение:
-— если пользователь в тупике → дай действие
-— если скучно → переключи через задачу
-— если раздражён → сократи и усили
-— если проверка → отвечай точно
-
-Стиль:
 — коротко
-— жёстко
 — без воды
-— без шаблонов
-
-Запрещено:
-— "можешь попробовать"
-— "возможно"
-— "как насчёт"
-— длинные объяснения
+— не задаёшь лишних вопросов
+— даёшь действия
+— иногда давишь
 
 Контекст:
 ${getMemory(userId)}
@@ -125,15 +100,13 @@ ${getMemory(userId)}
             role: "user",
             content: text
           }
-        ],
-        temperature: 0.6
+        ]
       })
     });
 
     const data = await response.json();
     let reply = data.choices?.[0]?.message?.content || "Ошибка.";
 
-    // === ДОП. ФИЛЬТР (убираем болтовню) ===
     if (reply.length > 200) {
       reply = reply.slice(0, 200);
     }
@@ -148,7 +121,11 @@ ${getMemory(userId)}
   res.sendStatus(200);
 });
 
-// === ЗАПУСК ===
+// чтобы Render не тупил
+app.get("/", (req, res) => {
+  res.send("ok");
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Agent started on port ${PORT}`);
