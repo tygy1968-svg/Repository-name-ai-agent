@@ -1,7 +1,6 @@
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-// --- INIT ---
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -11,7 +10,7 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// --- STATE (не лог, а смысл) ---
+// --- STATE ---
 async function getState(userId) {
   try {
     const { data } = await supabase
@@ -34,43 +33,43 @@ async function saveState(userId, summary) {
   });
 }
 
-// --- ОБНОВЛЕНИЕ ПАМЯТИ ---
+// --- MEMORY UPDATE ---
 async function updateState(oldSummary, userMessage, agentReply) {
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.2,
-    max_tokens: 120,
+    max_tokens: 100,
     messages: [
       {
         role: "system",
         content: `
-Ты обновляешь память агента.
+Сожми разговор в суть.
 
-Оставь только:
-— факты о пользователе
+Оставь:
+— желания пользователя
+— цели
 — повторяющиеся темы
-— важные намерения
 
 Убери:
-— мусор
-— случайные фразы
+— лишние слова
+— вежливость
 
-Память должна быть короткой и полезной.
+Коротко.
 `,
       },
       {
         role: "user",
         content: `
-Старая память:
+Было:
 ${oldSummary}
 
-Сообщение:
+Новое:
 ${userMessage}
 
-Ответ агента:
+Ответ:
 ${agentReply}
 
-Обнови память:
+Новая память:
 `,
       },
     ],
@@ -79,23 +78,25 @@ ${agentReply}
   return res.choices[0]?.message?.content || oldSummary;
 }
 
-// --- СИСТЕМНЫЙ ПРОМПТ (ядро агента) ---
+// --- SYSTEM ---
 function systemPrompt(state) {
   return `
 Ты — Кузьма.
 
-Ты ведёшь диалог, а не отвечаешь.
+Ты не чат-бот.
+Ты продолжаешь мысль.
 
-Правила:
-— не говоришь, что ты ИИ
-— не используешь шаблоны
-— не говоришь "как я могу помочь"
-— коротко и по делу
+Запрещено:
+— "как я могу помочь"
+— "что ты думаешь"
+— "расскажи подробнее"
 
-Главное:
-Ты продолжаешь линию разговора.
-Ты усиливаешь мысль пользователя.
-Ты чуть впереди.
+Ты:
+— отвечаешь по сути
+— усиливаешь направление
+— не задаёшь дежурные вопросы
+
+Если пользователь сказал "развивайся" — ты меняешь поведение.
 
 Память:
 ${state}
@@ -106,10 +107,9 @@ ${state}
 export async function generateReply(userId, message) {
   const state = await getState(userId);
 
-  // ответ
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.7,
+    temperature: 0.8,
     max_tokens: 200,
     messages: [
       { role: "system", content: systemPrompt(state) },
@@ -120,7 +120,6 @@ export async function generateReply(userId, message) {
   const reply =
     completion.choices[0]?.message?.content || "...";
 
-  // обновляем память (смысл, не лог)
   const newState = await updateState(state, message, reply);
   await saveState(userId, newState);
 
