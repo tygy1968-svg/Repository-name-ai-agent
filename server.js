@@ -25,8 +25,6 @@ async function sendMessage(chatId, text) {
 }
 
 // === MEMORY ===
-
-// 🔥 ЧИТАЕМ БЕЗ user_id (чтобы точно видеть память)
 async function getMemory() {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=20`,
@@ -42,9 +40,8 @@ async function getMemory() {
   return data.map(x => x.content).join("\n");
 }
 
-// 🔥 ПИШЕМ ПРОСТО В content
 async function saveMemory(content) {
-  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -57,56 +54,62 @@ async function saveMemory(content) {
       }
     ])
   });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(text);
+  }
+
+  return text;
 }
 
 // === WEBHOOK ===
 app.post("/webhook", async (req, res) => {
-  const message = req.body.message;
-  if (!message) return res.sendStatus(200);
+  try {
+    const message = req.body.message;
+    if (!message) return res.sendStatus(200);
 
-  const chatId = message.chat.id;
-  const text = message.text || "";
-  const lower = text.toLowerCase();
+    const chatId = message.chat.id;
+    const text = message.text || "";
+    const lower = text.toLowerCase();
 
-  // === ЗАПОМНИ ===
-  if (lower.includes("запомни")) {
-    const clean = text.replace("запомни:", "").trim();
-    await saveMemory(clean);
-    await sendMessage(chatId, "Сохранено.");
-    return res.sendStatus(200);
-  }
+    if (lower.includes("запомни")) {
+      const clean = text.replace("запомни:", "").trim();
 
-  // === ЧТО ТЫ ЗНАЕШЬ ===
-  if (lower.includes("что ты знаешь")) {
+      await saveMemory(clean);
+
+      await sendMessage(chatId, "Сохранено.");
+      return res.sendStatus(200);
+    }
+
+    if (lower.includes("что ты знаешь")) {
+      const memory = await getMemory();
+      await sendMessage(chatId, memory || "Пока ничего.");
+      return res.sendStatus(200);
+    }
+
     const memory = await getMemory();
-    await sendMessage(chatId, memory || "Пока ничего.");
-    return res.sendStatus(200);
-  }
+    const now = new Date().toISOString();
 
-  // === ПАМЯТЬ ===
-  const memory = await getMemory();
-  const now = new Date().toISOString();
-
-  // === МОДЕЛЬ ===
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
 Ты — агент.
 
 Правила:
 — коротко
 — без воды
 — не врёшь
-— если не знаешь — говоришь "не знаю"
 
 Память:
 ${memory}
@@ -114,21 +117,27 @@ ${memory}
 Время:
 ${now}
 `
-        },
-        {
-          role: "user",
-          content: text
-        }
-      ]
-    })
-  });
+          },
+          {
+            role: "user",
+            content: text
+          }
+        ]
+      })
+    });
 
-  const data = await response.json();
-  const reply = data.choices?.[0]?.message?.content || "Ошибка.";
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || "Ошибка.";
 
-  await sendMessage(chatId, reply);
+    await sendMessage(chatId, reply);
 
-  res.sendStatus(200);
+    res.sendStatus(200);
+
+  } catch (err) {
+    console.error("ERROR:", err.message);
+    await sendMessage(req.body.message.chat.id, "Ошибка записи: " + err.message);
+    res.sendStatus(200);
+  }
 });
 
 // === HEALTH ===
