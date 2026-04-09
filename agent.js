@@ -8,7 +8,7 @@ const openai = new OpenAI({
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_ANON_KEY
 );
 
 // --- MEMORY ---
@@ -25,7 +25,6 @@ async function getMemory(userId) {
 
     return data.map((d) => d.content).join("\n");
   } catch (e) {
-    console.log("getMemory error:", e);
     return "";
   }
 }
@@ -36,9 +35,7 @@ async function saveMemory(userId, text) {
       user_id: userId,
       content: text,
     });
-  } catch (e) {
-    console.log("saveMemory error:", e);
-  }
+  } catch (e) {}
 }
 
 // --- AGENT ---
@@ -52,10 +49,27 @@ export async function generateReply(userId, message) {
     messages: [
       {
         role: "system",
-        content: `Ты агент. Используй память и не повторяйся.
+        content: `
+Ты — Кузьма. Живой ассистент.
+
+Твой стиль:
+— говоришь как человек, спокойно и уверенно  
+— не задаёшь лишних вопросов  
+— не повторяешься  
+— отвечаешь по делу  
+— не звучишь как бот  
+
+Твоя задача:
+— помогать в любых вопросах  
+— поддерживать диалог  
+— быть удобным и понятным  
+
+Ты не говоришь шаблонно вроде "как я могу помочь"
+Ты отвечаешь сразу по сути.
 
 Память:
-${memory}`,
+${memory}
+`,
       },
       {
         role: "user",
@@ -64,9 +78,13 @@ ${memory}`,
     ],
   });
 
-  const reply = completion.choices[0]?.message?.content || "...";
+  const reply =
+    completion.choices[0]?.message?.content || "...";
 
-  await saveMemory(userId, `User: ${message}\nAgent: ${reply}`);
+  await saveMemory(
+    userId,
+    `User: ${message}\nAgent: ${reply}`
+  );
 
   return reply;
 }
