@@ -12,7 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// ===== отправка =====
+// === TELEGRAM ===
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
@@ -24,12 +24,10 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// ===== ПАМЯТЬ =====
-
-// читаем
+// === MEMORY ===
 async function getMemory(userId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/kuzia_memory?user_id=eq.${userId}&order=timestamp.desc&limit=20`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=20`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -42,9 +40,8 @@ async function getMemory(userId) {
   return data.map(x => x.content).join("\n");
 }
 
-// сохраняем
-async function saveMemory(userId, text) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/kuzia_memory`, {
+async function saveMemory(userId, content) {
+  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -54,111 +51,86 @@ async function saveMemory(userId, text) {
     body: JSON.stringify([
       {
         user_id: userId,
-        content: text,
-        importance: 1
+        content: content
       }
     ])
   });
-
-  const result = await res.text();
-
-  if (!res.ok) {
-    console.log("SUPABASE ERROR:", result);
-    throw new Error(result);
-  }
 }
 
-// ===== WEBHOOK =====
-
+// === WEBHOOK ===
 app.post("/webhook", async (req, res) => {
   const message = req.body.message;
   if (!message) return res.sendStatus(200);
 
   const chatId = message.chat.id;
-  const userId = String(message.from.id);
+  const userId = message.from.id;
   const text = message.text || "";
+
   const lower = text.toLowerCase();
 
-  try {
+  // === ЖЁСТКАЯ ЛОГИКА ===
+  if (lower.includes("запомни")) {
+    const clean = text.replace("запомни:", "").trim();
+    await saveMemory(userId, clean);
+    await sendMessage(chatId, "Сохранено.");
+    return res.sendStatus(200);
+  }
 
-    // ===== команды =====
-
-    if (lower.includes("запомни")) {
-      await saveMemory(userId, text);
-      await sendMessage(chatId, "Сохранено.");
-      return res.sendStatus(200);
-    }
-
-    if (lower.includes("что ты знаешь")) {
-      const memory = await getMemory(userId);
-      await sendMessage(chatId, memory || "Пусто.");
-      return res.sendStatus(200);
-    }
-
-    if (lower.includes("скучно")) {
-      await sendMessage(chatId, "Действие: возьми предмет рядом и придумай ему новую функцию. 20 секунд.");
-      return res.sendStatus(200);
-    }
-
-    // ===== память =====
-
+  if (lower.includes("что ты знаешь")) {
     const memory = await getMemory(userId);
-    const now = new Date().toISOString();
+    await sendMessage(chatId, memory || "Пока ничего.");
+    return res.sendStatus(200);
+  }
 
-    // ===== ответ =====
+  // === ПАМЯТЬ ===
+  const memory = await getMemory(userId);
+  const now = new Date().toISOString();
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
+  // === МОДЕЛЬ ===
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
 Ты — агент.
 
-— не врёшь
-— не выдумываешь действия
+Правила:
 — коротко
-— по делу
+— без воды
+— не врёшь
+— если не знаешь — говоришь "не знаю"
 
-Контекст:
+Память:
 ${memory}
 
 Время:
 ${now}
 `
-          },
-          {
-            role: "user",
-            content: text
-          }
-        ]
-      })
-    });
+        },
+        {
+          role: "user",
+          content: text
+        }
+      ]
+    })
+  });
 
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка.";
+  const data = await response.json();
+  const reply = data.choices?.[0]?.message?.content || "Ошибка.";
 
-    // сохраняем диалог
-    await saveMemory(userId, `user: ${text}`);
-    await saveMemory(userId, `agent: ${reply}`);
-
-    await sendMessage(chatId, reply);
-
-  } catch (err) {
-    console.log("ERROR:", err.message);
-    await sendMessage(chatId, "Ошибка: " + err.message);
-  }
+  await sendMessage(chatId, reply);
 
   res.sendStatus(200);
 });
 
-// ===== тест =====
+// === HEALTH ===
 app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
