@@ -12,7 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// === TELEGRAM ===
+// ===== TELEGRAM =====
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
@@ -24,10 +24,12 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// === MEMORY ===
+// ===== MEMORY =====
+
+// читаем только нормальные записи
 async function getMemory() {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=20`,
+    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=30`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -37,11 +39,18 @@ async function getMemory() {
   );
 
   const data = await res.json();
-  return data.map(x => x.content).join("\n");
+
+  return data
+    .map(x => x.content)
+    .filter(x => x && x.length > 5 && !x.toLowerCase().includes("привет"))
+    .join("\n");
 }
 
+// сохраняем только по команде
 async function saveMemory(content) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+  if (!content || content.length < 3) return;
+
+  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -54,17 +63,9 @@ async function saveMemory(content) {
       }
     ])
   });
-
-  const text = await res.text();
-
-  if (!res.ok) {
-    throw new Error(text);
-  }
-
-  return text;
 }
 
-// === WEBHOOK ===
+// ===== WEBHOOK =====
 app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
@@ -74,18 +75,11 @@ app.post("/webhook", async (req, res) => {
     const text = message.text || "";
     const lower = text.toLowerCase();
 
-    if (lower.includes("запомни")) {
+    // 👉 сохраняем ТОЛЬКО по команде
+    if (lower.startsWith("запомни")) {
       const clean = text.replace("запомни:", "").trim();
-
       await saveMemory(clean);
-
-      await sendMessage(chatId, "Сохранено.");
-      return res.sendStatus(200);
-    }
-
-    if (lower.includes("что ты знаешь")) {
-      const memory = await getMemory();
-      await sendMessage(chatId, memory || "Пока ничего.");
+      await sendMessage(chatId, "Запомнил.");
       return res.sendStatus(200);
     }
 
@@ -106,10 +100,9 @@ app.post("/webhook", async (req, res) => {
             content: `
 Ты — агент.
 
-Правила:
 — коротко
-— без воды
-— не врёшь
+— по делу
+— используешь память
 
 Память:
 ${memory}
@@ -135,12 +128,10 @@ ${now}
 
   } catch (err) {
     console.error("ERROR:", err.message);
-    await sendMessage(req.body.message.chat.id, "Ошибка записи: " + err.message);
     res.sendStatus(200);
   }
 });
 
-// === HEALTH ===
 app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
