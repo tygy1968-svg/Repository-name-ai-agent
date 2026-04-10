@@ -24,7 +24,7 @@ async function sendMessage(chatId, text) {
 
 async function getMemory(userId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=100`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=200`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -33,15 +33,16 @@ async function getMemory(userId) {
     }
   );
   const data = await res.json();
-  if (!Array.isArray(data)) return [];
-  return data;
+  return Array.isArray(data) ? data : [];
 }
 
 async function saveMemory(userId, content) {
   if (!content) return;
 
   const existing = await getMemory(userId);
-  const exists = existing.some(m => m.content.toLowerCase() === content.toLowerCase());
+  const exists = existing.some(
+    m => m.content.toLowerCase() === content.toLowerCase()
+  );
   if (exists) return;
 
   await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
@@ -62,7 +63,9 @@ async function saveMemory(userId, content) {
   });
 }
 
-async function extractMemoryWithAI(text) {
+/* ---------- НОВАЯ ЛОГИКА ---------- */
+
+async function extractMultipleMemories(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -75,10 +78,15 @@ async function extractMemoryWithAI(text) {
       messages: [
         {
           role: "system",
-          content: `Определи, содержит ли сообщение важный долгосрочный факт о пользователе (имя, город, работа, бизнес, цели, предпочтения, проекты, роли). 
-Если да — верни краткий факт в формате: "Категория: значение".
-Если нет — ответь строго: NONE.
-Без пояснений.`
+          content: `Извлеки из текста ВСЕ важные долгосрочные факты о пользователе.
+Категории: имя, город, бизнес, бренд, цели, страхи, предпочтения, стиль мышления, проекты, роли.
+
+Верни список фактов.
+Каждый факт с новой строки.
+Формат строго:
+Категория: значение
+
+Если фактов нет — верни строго: NONE`
         },
         { role: "user", content: text }
       ]
@@ -86,8 +94,22 @@ async function extractMemoryWithAI(text) {
   });
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim() || "NONE";
+  const result = data.choices?.[0]?.message?.content?.trim();
+
+  if (!result || result === "NONE") return [];
+
+  return result
+    .split("\n")
+    .map(x => x.trim())
+    .filter(x => x.length > 3 && x.includes(":"));
 }
+
+async function extractSingleMemory(text) {
+  const memories = await extractMultipleMemories(text);
+  return memories.length === 1 ? memories[0] : null;
+}
+
+/* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -105,9 +127,28 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
-    const extractedMemory = await extractMemoryWithAI(text);
-    if (extractedMemory && extractedMemory !== "NONE" && extractedMemory.length < 120) {
-      await saveMemory(userId, extractedMemory);
+    /* ---------- РЕЖИМ ИМПОРТА ---------- */
+
+    if (text.startsWith("ИМПОРТ ПРОФИЛЯ") || text.startsWith("ИМПОРТ АРХИВА")) {
+      const memories = await extractMultipleMemories(text);
+
+      for (const fact of memories) {
+        await saveMemory(userId, fact);
+      }
+
+      await sendMessage(
+        chatId,
+        `Импорт завершён. Сохранено фактов: ${memories.length}`
+      );
+
+      return res.sendStatus(200);
+    }
+
+    /* ---------- Обычная память ---------- */
+
+    const singleMemory = await extractSingleMemory(text);
+    if (singleMemory) {
+      await saveMemory(userId, singleMemory);
     }
 
     const memory = await getMemory(userId);
@@ -133,14 +174,10 @@ app.post("/webhook", async (req, res) => {
             role: "system",
             content: `Ты — Кузя, гибридный агент Юли.
 
-Роли:
-- Личный агент
-- Бизнес-консультант
-- Стратег
-- Спокойная и надёжная поддержка
-
-Говори естественно, без канцелярита и шаблонных фраз вроде "Я здесь, чтобы помочь". 
-Будь инициативным, предлагай следующие шаги, мысли структурно и по делу.
+Говори естественно.
+Мысли структурно.
+Предлагай следующий шаг.
+Без шаблонных фраз.
 
 Факты о пользователе:
 ${factsText || "нет сохранённых фактов"}`
@@ -151,7 +188,9 @@ ${factsText || "нет сохранённых фактов"}`
     });
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Хм, произошла ошибка. Попробуй ещё раз.";
+    const reply =
+      data.choices?.[0]?.message?.content ||
+      "Произошла ошибка. Попробуй ещё раз.";
 
     chatHistory[userId].push({ role: "assistant", content: reply });
 
@@ -167,5 +206,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent with smart memory started on port", PORT);
+  console.log("Kuzya agent with multi-memory import started on port", PORT);
 });
