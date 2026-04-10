@@ -11,7 +11,8 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// ===== TELEGRAM =====
+// ===================== TELEGRAM =====================
+
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
@@ -23,10 +24,11 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// ===== MEMORY =====
-async function getMemory() {
+// ===================== MEMORY =====================
+
+async function getMemory(userId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=20`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=20`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -66,46 +68,24 @@ async function saveMemory(userId, content) {
   });
 }
 
-// ===== SHOULD SAVE CHECK =====
-async function shouldSave(text) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
-Определи: нужно ли сохранить это сообщение как долгосрочный факт о пользователе.
+// ===================== SIMPLE SAVE LOGIC =====================
 
-Сохраняй если есть:
-— личный факт
-— место проживания
-— работа
-— план
-— предпочтение
-— важная информация
+function shouldSave(text) {
+  const t = text.toLowerCase();
 
-Ответ строго: YES или NO.
-`
-        },
-        { role: "user", content: text }
-      ],
-      temperature: 0
-    })
-  });
-
-  const data = await response.json();
-  const answer = data.choices?.[0]?.message?.content || "NO";
-
-  return answer.trim().toUpperCase().includes("YES");
+  return (
+    t.includes("меня зовут") ||
+    t.includes("я живу") ||
+    t.includes("я работаю") ||
+    t.includes("я владел") ||
+    t.includes("мой бренд") ||
+    t.includes("я планирую") ||
+    t.includes("я буду")
+  );
 }
 
-// ===== WEBHOOK =====
+// ===================== WEBHOOK =====================
+
 app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
@@ -115,10 +95,10 @@ app.post("/webhook", async (req, res) => {
     const userId = message.from.id;
     const text = message.text || "";
 
-    // 1. Читаем память
-    const memory = await getMemory();
+    // 1. Получаем память ТОЛЬКО этого пользователя
+    const memory = await getMemory(userId);
 
-    // 2. Генерируем ответ с обязательным использованием памяти
+    // 2. Генерируем ответ
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -134,30 +114,29 @@ app.post("/webhook", async (req, res) => {
 Ты автономный агент.
 
 Правила:
-— отвечай коротко
-— по делу
-— если в памяти есть факт, связанный с вопросом — обязательно используй его
-— не игнорируй факты из памяти
+1. Если вопрос касается фактов пользователя — сначала проверь память.
+2. Если факт есть — ответь строго на основе памяти.
+3. Если факта нет — скажи: "Я не знаю."
 
-Факты о пользователе:
+Факты пользователя:
 ${memory || "нет сохранённых фактов"}
 `
           },
           { role: "user", content: text }
         ],
-        temperature: 0.5
+        temperature: 0.4
       })
     });
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || "Ок.";
 
+    // 3. Отправляем ответ сразу
     await sendMessage(chatId, reply);
 
-    // 3. Отдельно проверяем — нужно ли сохранить
-    const save = await shouldSave(text);
-    if (save) {
-      await saveMemory(userId, text);
+    // 4. Сохраняем память без GPT
+    if (shouldSave(text)) {
+      saveMemory(userId, text);
     }
 
     res.sendStatus(200);
