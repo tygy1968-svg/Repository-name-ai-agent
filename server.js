@@ -18,16 +18,13 @@ async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text
-    })
+    body: JSON.stringify({ chat_id: chatId, text })
   });
 }
 
 async function getMemory(userId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=100`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -41,6 +38,12 @@ async function getMemory(userId) {
 }
 
 async function saveMemory(userId, content) {
+  if (!content) return;
+
+  const existing = await getMemory(userId);
+  const exists = existing.some(m => m.content.toLowerCase() === content.toLowerCase());
+  if (exists) return;
+
   await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
@@ -52,21 +55,38 @@ async function saveMemory(userId, content) {
       {
         user_id: String(userId),
         role: "user",
-        content: content,
+        content,
         type: "anchor"
       }
     ])
   });
 }
 
-function extractName(text) {
-  const match = text.match(/^меня зовут\s+(.+)/i);
-  return match ? match[1].trim() : null;
-}
+async function extractMemoryWithAI(text) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `Определи, содержит ли сообщение важный долгосрочный факт о пользователе (имя, город, работа, бизнес, цели, предпочтения, проекты, роли). 
+Если да — верни краткий факт в формате: "Категория: значение".
+Если нет — ответь строго: NONE.
+Без пояснений.`
+        },
+        { role: "user", content: text }
+      ]
+    })
+  });
 
-function extractCity(text) {
-  const match = text.match(/^я живу в\s+(.+)/i);
-  return match ? match[1].trim() : null;
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || "NONE";
 }
 
 app.post("/webhook", async (req, res) => {
@@ -83,24 +103,18 @@ app.post("/webhook", async (req, res) => {
     const chatId = message.chat.id;
     const userId = message.from.id;
     const text = (message.text || "").trim();
+    if (!text) return res.sendStatus(200);
 
-    const name = extractName(text);
-    if (name) {
-      await saveMemory(userId, `Имя: ${name}`);
-    }
-
-    const city = extractCity(text);
-    if (city) {
-      await saveMemory(userId, `Город: ${city}`);
+    const extractedMemory = await extractMemoryWithAI(text);
+    if (extractedMemory && extractedMemory !== "NONE" && extractedMemory.length < 120) {
+      await saveMemory(userId, extractedMemory);
     }
 
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
 
     if (!chatHistory[userId]) chatHistory[userId] = [];
-
     chatHistory[userId].push({ role: "user", content: text });
-
     if (chatHistory[userId].length > 12) {
       chatHistory[userId] = chatHistory[userId].slice(-12);
     }
@@ -117,32 +131,19 @@ app.post("/webhook", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: `
-Ты — Кузя.
+            content: `Ты — Кузя, гибридный агент Юли.
 
-Ты работаешь для Юли.
-Ты не чат-бот поддержки.
+Роли:
+- Личный агент
+- Бизнес-консультант
+- Стратег
+- Спокойная и надёжная поддержка
 
-Твоя гибридная роль:
+Говори естественно, без канцелярита и шаблонных фраз вроде "Я здесь, чтобы помочь". 
+Будь инициативным, предлагай следующие шаги, мысли структурно и по делу.
 
-1. Личный агент — помогаешь решать реальные задачи.
-2. Бизнес-консультант — мыслишь структурно.
-3. Стратег — видишь последствия решений.
-4. Поддержка — остаёшься спокойным и устойчивым.
-
-Ты говоришь естественно.
-Без канцелярита.
-Без фраз типа "Я здесь, чтобы помочь".
-Без чрезмерной формальности.
-
-Если есть факты о пользователе — учитывай их.
-
-Ты не просто отвечаешь.
-Ты анализируешь, уточняешь при необходимости и предлагаешь следующий шаг.
-
-Факты пользователя:
-${factsText || "нет сохранённых фактов"}
-`
+Факты о пользователе:
+${factsText || "нет сохранённых фактов"}`
           },
           ...chatHistory[userId]
         ]
@@ -150,13 +151,12 @@ ${factsText || "нет сохранённых фактов"}
     });
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ок.";
+    const reply = data.choices?.[0]?.message?.content || "Хм, произошла ошибка. Попробуй ещё раз.";
 
     chatHistory[userId].push({ role: "assistant", content: reply });
 
     await sendMessage(chatId, reply);
     res.sendStatus(200);
-
   } catch (err) {
     console.error("ERROR:", err);
     res.sendStatus(200);
@@ -167,5 +167,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Agent started on port", PORT);
+  console.log("Kuzya agent with smart memory started on port", PORT);
 });
