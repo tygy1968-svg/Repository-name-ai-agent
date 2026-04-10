@@ -18,7 +18,7 @@ async function sendMessage(chatId, text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
-      text
+      text: text
     })
   });
 }
@@ -37,7 +37,12 @@ async function getMemory() {
 
   const data = await res.json();
 
-  return data.map(x => x.content).filter(Boolean).join("\n");
+  if (!Array.isArray(data)) return "";
+
+  return data
+    .map(x => x.content)
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function saveMemory(userId, content) {
@@ -75,15 +80,17 @@ async function shouldSave(text) {
         {
           role: "system",
           content: `
-Определи: нужно ли сохранить это сообщение как долгосрочную память.
-Сохраняй только если есть:
-— личный факт
-— предпочтение
-— решение
-— план
-— важная информация о пользователе
+Определи: нужно ли сохранить это сообщение как долгосрочный факт о пользователе.
 
-Ответь строго YES или NO.
+Сохраняй если есть:
+— личный факт
+— место проживания
+— работа
+— план
+— предпочтение
+— важная информация
+
+Ответ строго: YES или NO.
 `
         },
         { role: "user", content: text }
@@ -95,7 +102,7 @@ async function shouldSave(text) {
   const data = await response.json();
   const answer = data.choices?.[0]?.message?.content || "NO";
 
-  return answer.trim().toUpperCase() === "YES";
+  return answer.trim().toUpperCase().includes("YES");
 }
 
 // ===== WEBHOOK =====
@@ -108,9 +115,10 @@ app.post("/webhook", async (req, res) => {
     const userId = message.from.id;
     const text = message.text || "";
 
+    // 1. Читаем память
     const memory = await getMemory();
 
-    // === Генерируем ответ ===
+    // 2. Генерируем ответ с обязательным использованием памяти
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -124,17 +132,20 @@ app.post("/webhook", async (req, res) => {
             role: "system",
             content: `
 Ты автономный агент.
-Коротко.
-По делу.
-Используй память если она есть.
 
-Память:
-${memory}
+Правила:
+— отвечай коротко
+— по делу
+— если в памяти есть факт, связанный с вопросом — обязательно используй его
+— не игнорируй факты из памяти
+
+Факты о пользователе:
+${memory || "нет сохранённых фактов"}
 `
           },
           { role: "user", content: text }
         ],
-        temperature: 0.6
+        temperature: 0.5
       })
     });
 
@@ -143,7 +154,7 @@ ${memory}
 
     await sendMessage(chatId, reply);
 
-    // === Проверяем нужно ли сохранить ===
+    // 3. Отдельно проверяем — нужно ли сохранить
     const save = await shouldSave(text);
     if (save) {
       await saveMemory(userId, text);
