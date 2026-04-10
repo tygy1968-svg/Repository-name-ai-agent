@@ -6,7 +6,6 @@ app.use(express.json());
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
@@ -25,11 +24,9 @@ async function sendMessage(chatId, text) {
 }
 
 // ===== MEMORY =====
-
-// читаем только нормальные записи
 async function getMemory() {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=30`,
+    `${SUPABASE_URL}/rest/v1/memory?order=created_at.desc&limit=20`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -42,13 +39,12 @@ async function getMemory() {
 
   return data
     .map(x => x.content)
-    .filter(x => x && x.length > 5 && !x.toLowerCase().includes("привет"))
+    .filter(Boolean)
     .join("\n");
 }
 
-// сохраняем только по команде
-async function saveMemory(content) {
-  if (!content || content.length < 3) return;
+async function saveMemory(userId, content) {
+  if (!content || content.length < 5) return;
 
   await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
@@ -59,10 +55,70 @@ async function saveMemory(content) {
     },
     body: JSON.stringify([
       {
-        content: content
+        user_id: String(userId),
+        role: "user",
+        content: content,
+        memory_type: "longterm"
       }
     ])
   });
+}
+
+// ===== PLANNER =====
+async function planAction(userText, memory) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
+Ты автономный агент.
+
+Твоя задача — решить:
+1) Ответить пользователю
+2) Сохранить сообщение в долгосрочную память
+
+Ответь строго JSON без объяснений:
+
+{
+  "action": "reply" | "reply_and_save",
+  "reply": "текст ответа"
+}
+
+Сохраняй только если сообщение содержит:
+- важный факт
+- предпочтение
+- решение
+- план
+- информацию, которая пригодится позже
+
+Память:
+${memory}
+`
+        },
+        {
+          role: "user",
+          content: userText
+        }
+      ],
+      temperature: 0.2
+    })
+  });
+
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content || "{}";
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { action: "reply", reply: text };
+  }
 }
 
 // ===== WEBHOOK =====
@@ -72,62 +128,21 @@ app.post("/webhook", async (req, res) => {
     if (!message) return res.sendStatus(200);
 
     const chatId = message.chat.id;
+    const userId = message.from.id;
     const text = message.text || "";
-    const lower = text.toLowerCase();
-
-    // 👉 сохраняем ТОЛЬКО по команде
-    if (lower.startsWith("запомни")) {
-      const clean = text.replace("запомни:", "").trim();
-      await saveMemory(clean);
-      await sendMessage(chatId, "Запомнил.");
-      return res.sendStatus(200);
-    }
 
     const memory = await getMemory();
-    const now = new Date().toISOString();
+    const decision = await planAction(text, memory);
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
-Ты — агент.
+    if (decision.action === "reply_and_save") {
+      await saveMemory(userId, text);
+    }
 
-— коротко
-— по делу
-— используешь память
-
-Память:
-${memory}
-
-Время:
-${now}
-`
-          },
-          {
-            role: "user",
-            content: text
-          }
-        ]
-      })
-    });
-
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка.";
-
-    await sendMessage(chatId, reply);
+    await sendMessage(chatId, decision.reply || "Ок.");
 
     res.sendStatus(200);
-
   } catch (err) {
-    console.error("ERROR:", err.message);
+    console.error("ERROR:", err);
     res.sendStatus(200);
   }
 });
