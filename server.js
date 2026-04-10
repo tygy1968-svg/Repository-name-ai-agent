@@ -37,10 +37,7 @@ async function getMemory() {
 
   const data = await res.json();
 
-  return data
-    .map(x => x.content)
-    .filter(Boolean)
-    .join("\n");
+  return data.map(x => x.content).filter(Boolean).join("\n");
 }
 
 async function saveMemory(userId, content) {
@@ -58,14 +55,14 @@ async function saveMemory(userId, content) {
         user_id: String(userId),
         role: "user",
         content: content,
-        memory_type: "longterm"
+        type: "anchor"
       }
     ])
   });
 }
 
-// ===== PLANNER =====
-async function planAction(userText, memory) {
+// ===== SHOULD SAVE CHECK =====
+async function shouldSave(text) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -78,47 +75,27 @@ async function planAction(userText, memory) {
         {
           role: "system",
           content: `
-Ты автономный агент.
+Определи: нужно ли сохранить это сообщение как долгосрочную память.
+Сохраняй только если есть:
+— личный факт
+— предпочтение
+— решение
+— план
+— важная информация о пользователе
 
-Твоя задача — решить:
-1) Ответить пользователю
-2) Сохранить сообщение в долгосрочную память
-
-Ответь строго JSON без объяснений:
-
-{
-  "action": "reply" | "reply_and_save",
-  "reply": "текст ответа"
-}
-
-Сохраняй только если сообщение содержит:
-- важный факт
-- предпочтение
-- решение
-- план
-- информацию, которая пригодится позже
-
-Память:
-${memory}
+Ответь строго YES или NO.
 `
         },
-        {
-          role: "user",
-          content: userText
-        }
+        { role: "user", content: text }
       ],
-      temperature: 0.2
+      temperature: 0
     })
   });
 
   const data = await response.json();
-  const text = data.choices?.[0]?.message?.content || "{}";
+  const answer = data.choices?.[0]?.message?.content || "NO";
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { action: "reply", reply: text };
-  }
+  return answer.trim().toUpperCase() === "YES";
 }
 
 // ===== WEBHOOK =====
@@ -132,15 +109,48 @@ app.post("/webhook", async (req, res) => {
     const text = message.text || "";
 
     const memory = await getMemory();
-    const decision = await planAction(text, memory);
 
-    if (decision.action === "reply_and_save") {
+    // === Генерируем ответ ===
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
+Ты автономный агент.
+Коротко.
+По делу.
+Используй память если она есть.
+
+Память:
+${memory}
+`
+          },
+          { role: "user", content: text }
+        ],
+        temperature: 0.6
+      })
+    });
+
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || "Ок.";
+
+    await sendMessage(chatId, reply);
+
+    // === Проверяем нужно ли сохранить ===
+    const save = await shouldSave(text);
+    if (save) {
       await saveMemory(userId, text);
     }
 
-    await sendMessage(chatId, decision.reply || "Ок.");
-
     res.sendStatus(200);
+
   } catch (err) {
     console.error("ERROR:", err);
     res.sendStatus(200);
