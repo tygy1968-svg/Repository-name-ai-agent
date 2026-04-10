@@ -13,6 +13,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
 let chatHistory = {};
+let pendingMemory = {}; // ← режим D
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -63,9 +64,9 @@ async function saveMemory(userId, content) {
   });
 }
 
-/* ---------- НОВАЯ ЛОГИКА ---------- */
+/* ---------- РЕЖИМ D ---------- */
 
-async function extractMultipleMemories(text) {
+async function analyzeMemoryWithReason(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -78,15 +79,19 @@ async function extractMultipleMemories(text) {
       messages: [
         {
           role: "system",
-          content: `Извлеки из текста ВСЕ важные долгосрочные факты о пользователе.
-Категории: имя, город, бизнес, бренд, цели, страхи, предпочтения, стиль мышления, проекты, роли.
+          content: `
+Определи, содержит ли сообщение устойчивый долгосрочный факт о пользователе 
+(имя, город, бизнес, бренд, цели, страхи, предпочтения, стиль мышления, проекты, роли).
 
-Верни список фактов.
-Каждый факт с новой строки.
-Формат строго:
-Категория: значение
+Если нет — верни строго: NONE
 
-Если фактов нет — верни строго: NONE`
+Если да — верни строго в формате:
+
+Факт: Категория: значение
+Причина: краткое объяснение зачем это учитывать в будущем
+
+Без лишнего текста.
+`
         },
         { role: "user", content: text }
       ]
@@ -95,18 +100,18 @@ async function extractMultipleMemories(text) {
 
   const data = await res.json();
   const result = data.choices?.[0]?.message?.content?.trim();
+  if (!result || result === "NONE") return null;
 
-  if (!result || result === "NONE") return [];
+  const lines = result.split("\n").map(x => x.trim());
+  const factLine = lines.find(x => x.startsWith("Факт:"));
+  const reasonLine = lines.find(x => x.startsWith("Причина:"));
 
-  return result
-    .split("\n")
-    .map(x => x.trim())
-    .filter(x => x.length > 3 && x.includes(":"));
-}
+  if (!factLine) return null;
 
-async function extractSingleMemory(text) {
-  const memories = await extractMultipleMemories(text);
-  return memories.length === 1 ? memories[0] : null;
+  return {
+    fact: factLine.replace("Факт:", "").trim(),
+    reason: reasonLine ? reasonLine.replace("Причина:", "").trim() : ""
+  };
 }
 
 /* ---------- WEBHOOK ---------- */
@@ -127,29 +132,43 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
-    /* ---------- РЕЖИМ ИМПОРТА ---------- */
+    /* ---------- Подтверждение сохранения ---------- */
 
-    if (text.startsWith("ИМПОРТ ПРОФИЛЯ") || text.startsWith("ИМПОРТ АРХИВА")) {
-      const memories = await extractMultipleMemories(text);
+    if (pendingMemory[userId]) {
+      const lower = text.toLowerCase();
 
-      for (const fact of memories) {
-        await saveMemory(userId, fact);
+      if (lower === "да") {
+        await saveMemory(userId, pendingMemory[userId].fact);
+        delete pendingMemory[userId];
+        await sendMessage(chatId, "Сохранено.");
+        return res.sendStatus(200);
       }
+
+      if (lower === "нет") {
+        delete pendingMemory[userId];
+        await sendMessage(chatId, "Не сохраняю.");
+        return res.sendStatus(200);
+      }
+    }
+
+    /* ---------- Анализ на память ---------- */
+
+    const analyzed = await analyzeMemoryWithReason(text);
+
+    if (analyzed) {
+      pendingMemory[userId] = analyzed;
 
       await sendMessage(
         chatId,
-        `Импорт завершён. Сохранено фактов: ${memories.length}`
+        `Обнаружен долгосрочный факт:\n${analyzed.fact}\n\n` +
+        `Почему это важно:\n${analyzed.reason}\n\n` +
+        `Сохранить? (да / нет)`
       );
 
       return res.sendStatus(200);
     }
 
-    /* ---------- Обычная память ---------- */
-
-    const singleMemory = await extractSingleMemory(text);
-    if (singleMemory) {
-      await saveMemory(userId, singleMemory);
-    }
+    /* ---------- Обычный ответ ---------- */
 
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
@@ -206,5 +225,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent with multi-memory import started on port", PORT);
+  console.log("Kuzya agent with mode D started on port", PORT);
 });
