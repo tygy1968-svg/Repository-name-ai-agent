@@ -30,7 +30,7 @@ async function sendMessage(chatId, text) {
 
 async function getMemory(userId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=20`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -41,7 +41,6 @@ async function getMemory(userId) {
 
   const data = await res.json();
   if (!Array.isArray(data)) return [];
-
   return data;
 }
 
@@ -68,8 +67,19 @@ async function saveMemory(userId, content) {
 
 function extractName(text) {
   const match = text.match(/^меня зовут\s+(.+)/i);
-  if (match) return match[1].trim();
-  return null;
+  return match ? match[1].trim() : null;
+}
+
+function extractCity(text) {
+  const match = text.match(/^я живу в\s+(.+)/i);
+  return match ? match[1].trim() : null;
+}
+
+// ================= HELPERS =================
+
+function findFact(memory, prefix) {
+  const row = memory.find(x => x.content.startsWith(prefix));
+  return row ? row.content.replace(prefix, "").trim() : null;
 }
 
 // ================= WEBHOOK =================
@@ -77,7 +87,6 @@ function extractName(text) {
 app.post("/webhook", async (req, res) => {
   try {
     const update = req.body;
-
     if (!update.message) return res.sendStatus(200);
 
     if (update.update_id === lastUpdateId) {
@@ -88,34 +97,43 @@ app.post("/webhook", async (req, res) => {
     const message = update.message;
     const chatId = message.chat.id;
     const userId = message.from.id;
-    const text = message.text || "";
+    const text = (message.text || "").trim();
+    const lower = text.toLowerCase();
 
-    // === 1. Проверяем: пользователь сообщил имя ===
+    // === 1. Имя ===
     const name = extractName(text);
-
     if (name) {
       await saveMemory(userId, `Имя: ${name}`);
       await sendMessage(chatId, `Запомнил. Тебя зовут ${name}.`);
       return res.sendStatus(200);
     }
 
-    // === 2. Проверяем: спрашивают имя ===
-    if (text.toLowerCase().includes("как меня зовут")) {
+    if (lower.includes("как меня зовут")) {
       const memory = await getMemory(userId);
-      const nameRow = memory.find(x => x.content.startsWith("Имя:"));
+      const savedName = findFact(memory, "Имя:");
+      await sendMessage(chatId, savedName ? `Тебя зовут ${savedName}.` : "Я не знаю.");
+      return res.sendStatus(200);
+    }
 
-      if (nameRow) {
-        const savedName = nameRow.content.replace("Имя:", "").trim();
-        await sendMessage(chatId, `Тебя зовут ${savedName}.`);
-      } else {
-        await sendMessage(chatId, "Я не знаю.");
-      }
+    // === 2. Город ===
+    const city = extractCity(text);
+    if (city) {
+      await saveMemory(userId, `Город: ${city}`);
+      await sendMessage(chatId, `Запомнил. Ты живёшь в ${city}.`);
+      return res.sendStatus(200);
+    }
 
+    if (
+      lower.includes("где я живу") ||
+      lower.includes("в каком городе я живу")
+    ) {
+      const memory = await getMemory(userId);
+      const savedCity = findFact(memory, "Город:");
+      await sendMessage(chatId, savedCity ? `Ты живёшь в ${savedCity}.` : "Я не знаю.");
       return res.sendStatus(200);
     }
 
     // === 3. Свободный запрос → GPT ===
-
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
 
@@ -130,12 +148,7 @@ app.post("/webhook", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: `
-Ты автономный агент.
-
-Факты пользователя:
-${factsText || "нет сохранённых фактов"}
-`
+            content: `Ты автономный агент. Учитывай факты пользователя, если они есть.\n\nФакты:\n${factsText || "нет"}`
           },
           { role: "user", content: text }
         ],
