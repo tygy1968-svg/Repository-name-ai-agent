@@ -12,9 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
-let chatHistory = {}; // хранение истории по пользователям
-
-// ================= TELEGRAM =================
+let chatHistory = {};
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -27,8 +25,6 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// ================= MEMORY =================
-
 async function getMemory(userId) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
@@ -39,7 +35,6 @@ async function getMemory(userId) {
       }
     }
   );
-
   const data = await res.json();
   if (!Array.isArray(data)) return [];
   return data;
@@ -64,8 +59,6 @@ async function saveMemory(userId, content) {
   });
 }
 
-// ================= PARSING =================
-
 function extractName(text) {
   const match = text.match(/^меня зовут\s+(.+)/i);
   return match ? match[1].trim() : null;
@@ -75,8 +68,6 @@ function extractCity(text) {
   const match = text.match(/^я живу в\s+(.+)/i);
   return match ? match[1].trim() : null;
 }
-
-// ================= WEBHOOK =================
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -92,9 +83,7 @@ app.post("/webhook", async (req, res) => {
     const chatId = message.chat.id;
     const userId = message.from.id;
     const text = (message.text || "").trim();
-    const lower = text.toLowerCase();
 
-    // ===== сохраняем факты =====
     const name = extractName(text);
     if (name) {
       await saveMemory(userId, `Имя: ${name}`);
@@ -105,20 +94,17 @@ app.post("/webhook", async (req, res) => {
       await saveMemory(userId, `Город: ${city}`);
     }
 
-    // ===== получаем факты =====
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
 
-    // ===== история диалога =====
     if (!chatHistory[userId]) chatHistory[userId] = [];
 
     chatHistory[userId].push({ role: "user", content: text });
 
-    if (chatHistory[userId].length > 10) {
-      chatHistory[userId] = chatHistory[userId].slice(-10);
+    if (chatHistory[userId].length > 12) {
+      chatHistory[userId] = chatHistory[userId].slice(-12);
     }
 
-    // ===== запрос к GPT =====
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -127,21 +113,39 @@ app.post("/webhook", async (req, res) => {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
+        temperature: 0.6,
         messages: [
           {
             role: "system",
             content: `
-Ты умный автономный ассистент.
+Ты — Кузя.
 
-Используй факты пользователя, если они есть.
+Ты работаешь для Юли.
+Ты не чат-бот поддержки.
 
-Факты:
+Твоя гибридная роль:
+
+1. Личный агент — помогаешь решать реальные задачи.
+2. Бизнес-консультант — мыслишь структурно.
+3. Стратег — видишь последствия решений.
+4. Поддержка — остаёшься спокойным и устойчивым.
+
+Ты говоришь естественно.
+Без канцелярита.
+Без фраз типа "Я здесь, чтобы помочь".
+Без чрезмерной формальности.
+
+Если есть факты о пользователе — учитывай их.
+
+Ты не просто отвечаешь.
+Ты анализируешь, уточняешь при необходимости и предлагаешь следующий шаг.
+
+Факты пользователя:
 ${factsText || "нет сохранённых фактов"}
 `
           },
           ...chatHistory[userId]
-        ],
-        temperature: 0.6
+        ]
       })
     });
 
