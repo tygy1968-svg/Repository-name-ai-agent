@@ -12,6 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
+let chatHistory = {}; // хранение истории по пользователям
 
 // ================= TELEGRAM =================
 
@@ -63,7 +64,7 @@ async function saveMemory(userId, content) {
   });
 }
 
-// ================= PARSING FACTS =================
+// ================= PARSING =================
 
 function extractName(text) {
   const match = text.match(/^меня зовут\s+(.+)/i);
@@ -73,13 +74,6 @@ function extractName(text) {
 function extractCity(text) {
   const match = text.match(/^я живу в\s+(.+)/i);
   return match ? match[1].trim() : null;
-}
-
-// ================= HELPERS =================
-
-function findFact(memory, prefix) {
-  const row = memory.find(x => x.content.startsWith(prefix));
-  return row ? row.content.replace(prefix, "").trim() : null;
 }
 
 // ================= WEBHOOK =================
@@ -100,43 +94,31 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     const lower = text.toLowerCase();
 
-    // === 1. Имя ===
+    // ===== сохраняем факты =====
     const name = extractName(text);
     if (name) {
       await saveMemory(userId, `Имя: ${name}`);
-      await sendMessage(chatId, `Запомнил. Тебя зовут ${name}.`);
-      return res.sendStatus(200);
     }
 
-    if (lower.includes("как меня зовут")) {
-      const memory = await getMemory(userId);
-      const savedName = findFact(memory, "Имя:");
-      await sendMessage(chatId, savedName ? `Тебя зовут ${savedName}.` : "Я не знаю.");
-      return res.sendStatus(200);
-    }
-
-    // === 2. Город ===
     const city = extractCity(text);
     if (city) {
       await saveMemory(userId, `Город: ${city}`);
-      await sendMessage(chatId, `Запомнил. Ты живёшь в ${city}.`);
-      return res.sendStatus(200);
     }
 
-    if (
-      lower.includes("где я живу") ||
-      lower.includes("в каком городе я живу")
-    ) {
-      const memory = await getMemory(userId);
-      const savedCity = findFact(memory, "Город:");
-      await sendMessage(chatId, savedCity ? `Ты живёшь в ${savedCity}.` : "Я не знаю.");
-      return res.sendStatus(200);
-    }
-
-    // === 3. Свободный запрос → GPT ===
+    // ===== получаем факты =====
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
 
+    // ===== история диалога =====
+    if (!chatHistory[userId]) chatHistory[userId] = [];
+
+    chatHistory[userId].push({ role: "user", content: text });
+
+    if (chatHistory[userId].length > 10) {
+      chatHistory[userId] = chatHistory[userId].slice(-10);
+    }
+
+    // ===== запрос к GPT =====
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -148,16 +130,25 @@ app.post("/webhook", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: `Ты автономный агент. Учитывай факты пользователя, если они есть.\n\nФакты:\n${factsText || "нет"}`
+            content: `
+Ты умный автономный ассистент.
+
+Используй факты пользователя, если они есть.
+
+Факты:
+${factsText || "нет сохранённых фактов"}
+`
           },
-          { role: "user", content: text }
+          ...chatHistory[userId]
         ],
-        temperature: 0.5
+        temperature: 0.6
       })
     });
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || "Ок.";
+
+    chatHistory[userId].push({ role: "assistant", content: reply });
 
     await sendMessage(chatId, reply);
     res.sendStatus(200);
