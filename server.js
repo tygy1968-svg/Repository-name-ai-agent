@@ -11,7 +11,9 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// ===================== TELEGRAM =====================
+let lastUpdateId = null;
+
+// ================= TELEGRAM =================
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -24,7 +26,7 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// ===================== MEMORY =====================
+// ================= MEMORY =================
 
 async function getMemory(userId) {
   const res = await fetch(
@@ -38,18 +40,12 @@ async function getMemory(userId) {
   );
 
   const data = await res.json();
-
   if (!Array.isArray(data)) return "";
 
-  return data
-    .map(x => x.content)
-    .filter(Boolean)
-    .join("\n");
+  return data.map(x => x.content).filter(Boolean).join("\n");
 }
 
 async function saveMemory(userId, content) {
-  if (!content || content.length < 5) return;
-
   await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
     method: "POST",
     headers: {
@@ -68,7 +64,7 @@ async function saveMemory(userId, content) {
   });
 }
 
-// ===================== SIMPLE SAVE LOGIC =====================
+// ================= SIMPLE SAVE RULE =================
 
 function shouldSave(text) {
   const t = text.toLowerCase();
@@ -84,21 +80,34 @@ function shouldSave(text) {
   );
 }
 
-// ===================== WEBHOOK =====================
+// ================= WEBHOOK =================
 
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.message;
-    if (!message) return res.sendStatus(200);
+    const update = req.body;
 
+    if (!update.message) return res.sendStatus(200);
+
+    // Защита от повторного webhook
+    if (update.update_id === lastUpdateId) {
+      return res.sendStatus(200);
+    }
+    lastUpdateId = update.update_id;
+
+    const message = update.message;
     const chatId = message.chat.id;
     const userId = message.from.id;
     const text = message.text || "";
 
-    // 1. Получаем память ТОЛЬКО этого пользователя
+    // 1️⃣ Сначала сохраняем если нужно
+    if (shouldSave(text)) {
+      await saveMemory(userId, text);
+    }
+
+    // 2️⃣ Потом читаем память
     const memory = await getMemory(userId);
 
-    // 2. Генерируем ответ
+    // 3️⃣ Генерируем ответ
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -114,7 +123,7 @@ app.post("/webhook", async (req, res) => {
 Ты автономный агент.
 
 Правила:
-1. Если вопрос касается фактов пользователя — сначала проверь память.
+1. Если вопрос связан с личными фактами — проверь память.
 2. Если факт есть — ответь строго на основе памяти.
 3. Если факта нет — скажи: "Я не знаю."
 
@@ -131,13 +140,8 @@ ${memory || "нет сохранённых фактов"}
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || "Ок.";
 
-    // 3. Отправляем ответ сразу
+    // 4️⃣ Отвечаем Telegram
     await sendMessage(chatId, reply);
-
-    // 4. Сохраняем память без GPT
-    if (shouldSave(text)) {
-      saveMemory(userId, text);
-    }
 
     res.sendStatus(200);
 
