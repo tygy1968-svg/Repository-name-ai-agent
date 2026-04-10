@@ -40,9 +40,9 @@ async function getMemory(userId) {
   );
 
   const data = await res.json();
-  if (!Array.isArray(data)) return "";
+  if (!Array.isArray(data)) return [];
 
-  return data.map(x => x.content).filter(Boolean).join("\n");
+  return data;
 }
 
 async function saveMemory(userId, content) {
@@ -64,20 +64,12 @@ async function saveMemory(userId, content) {
   });
 }
 
-// ================= SIMPLE SAVE RULE =================
+// ================= PARSING FACTS =================
 
-function shouldSave(text) {
-  const t = text.toLowerCase();
-
-  return (
-    t.includes("меня зовут") ||
-    t.includes("я живу") ||
-    t.includes("я работаю") ||
-    t.includes("я владел") ||
-    t.includes("мой бренд") ||
-    t.includes("я планирую") ||
-    t.includes("я буду")
-  );
+function extractName(text) {
+  const match = text.match(/^меня зовут\s+(.+)/i);
+  if (match) return match[1].trim();
+  return null;
 }
 
 // ================= WEBHOOK =================
@@ -88,7 +80,6 @@ app.post("/webhook", async (req, res) => {
 
     if (!update.message) return res.sendStatus(200);
 
-    // Защита от повторного webhook
     if (update.update_id === lastUpdateId) {
       return res.sendStatus(200);
     }
@@ -99,15 +90,35 @@ app.post("/webhook", async (req, res) => {
     const userId = message.from.id;
     const text = message.text || "";
 
-    // 1️⃣ Сначала сохраняем если нужно
-    if (shouldSave(text)) {
-      await saveMemory(userId, text);
+    // === 1. Проверяем: пользователь сообщил имя ===
+    const name = extractName(text);
+
+    if (name) {
+      await saveMemory(userId, `Имя: ${name}`);
+      await sendMessage(chatId, `Запомнил. Тебя зовут ${name}.`);
+      return res.sendStatus(200);
     }
 
-    // 2️⃣ Потом читаем память
-    const memory = await getMemory(userId);
+    // === 2. Проверяем: спрашивают имя ===
+    if (text.toLowerCase().includes("как меня зовут")) {
+      const memory = await getMemory(userId);
+      const nameRow = memory.find(x => x.content.startsWith("Имя:"));
 
-    // 3️⃣ Генерируем ответ
+      if (nameRow) {
+        const savedName = nameRow.content.replace("Имя:", "").trim();
+        await sendMessage(chatId, `Тебя зовут ${savedName}.`);
+      } else {
+        await sendMessage(chatId, "Я не знаю.");
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // === 3. Свободный запрос → GPT ===
+
+    const memory = await getMemory(userId);
+    const factsText = memory.map(x => x.content).join("\n");
+
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -122,27 +133,20 @@ app.post("/webhook", async (req, res) => {
             content: `
 Ты автономный агент.
 
-Правила:
-1. Если вопрос связан с личными фактами — проверь память.
-2. Если факт есть — ответь строго на основе памяти.
-3. Если факта нет — скажи: "Я не знаю."
-
 Факты пользователя:
-${memory || "нет сохранённых фактов"}
+${factsText || "нет сохранённых фактов"}
 `
           },
           { role: "user", content: text }
         ],
-        temperature: 0.4
+        temperature: 0.5
       })
     });
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || "Ок.";
 
-    // 4️⃣ Отвечаем Telegram
     await sendMessage(chatId, reply);
-
     res.sendStatus(200);
 
   } catch (err) {
