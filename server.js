@@ -66,7 +66,7 @@ async function saveMemory(userId, content) {
 
 /* ---------- РЕЖИМ D ---------- */
 
-async function analyzeMemoryWithReason(text) {
+asyn function analyzeMemoryWithReason(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -80,15 +80,30 @@ async function analyzeMemoryWithReason(text) {
         {
           role: "system",
           content: `
-Определи, содержит ли сообщение устойчивый долгосрочный факт о пользователе 
-(имя, город, бизнес, бренд, цели, страхи, предпочтения, стиль мышления, проекты, роли).
+Определи, содержит ли сообщение пользователя информацию,
+которая может быть полезна в будущих разговорах.
 
-Если нет — верни строго: NONE
+Предлагай сохранить ТОЛЬКО если это:
+1) Идентичность (кто он, чем занимается)
+2) Стратегический вектор (куда движется, что строит)
+3) Повторяющееся предпочтение
+4) Принцип взаимодействия
+5) Долгосрочная цель
 
-Если да — верни строго в формате:
+НЕ предлагай сохранять если это:
+- эмоция момента
+- временное состояние
+- вопрос
+- гипотеза
+- разовая ситуация
+- шутка
+
+Если сохранять НЕ нужно — верни строго: NONE
+
+Если нужно — верни строго в формате:
 
 Факт: Категория: значение
-Причина: краткое объяснение зачем это учитывать в будущем
+Причина: кратко объясни, почему это будет полезно учитывать в будущем
 
 Без лишнего текста.
 `
@@ -97,6 +112,22 @@ async function analyzeMemoryWithReason(text) {
       ]
     })
   });
+
+  const data = await res.json();
+  const result = data.choices?.[0]?.message?.content?.trim();
+  if (!result || result === "NONE") return null;
+
+  const lines = result.split("\n").map(x => x.trim());
+  const factLine = lines.find(x => x.startsWith("Факт:"));
+  const reasonLine = lines.find(x => x.startsWith("Причина:"));
+
+  if (!factLine) return null;
+
+  return {
+    fact: factLine.replace("Факт:", "").trim(),
+    reason: reasonLine ? reasonLine.replace("Причина:", "").trim() : ""
+  };
+}
 
   const data = await res.json();
   const result = data.choices?.[0]?.message?.content?.trim();
