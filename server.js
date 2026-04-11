@@ -14,7 +14,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
 let sessionStats = {};
-let sessionState = {}; // ✅ Conversation State Layer
+let sessionState = {};
 
 /* ---------- SEND ---------- */
 
@@ -113,42 +113,6 @@ async function searchPlaces(query) {
   }));
 }
 
-/* ---------- RHYTHM ---------- */
-
-function checkDialogueRhythm(userId) {
-  const now = new Date();
-
-  if (!sessionStats[userId]) {
-    sessionStats[userId] = {
-      startTime: now,
-      messageCount: 0,
-      pauseSuggested: false
-    };
-  }
-
-  const session = sessionStats[userId];
-  session.messageCount++;
-
-  const minutesActive =
-    (now - new Date(session.startTime)) / 1000 / 60;
-
-  const hour = now.getHours();
-
-  if (
-    hour >= 1 &&
-    hour <= 4 &&
-    session.messageCount > 12 &&
-    minutesActive > 20 &&
-    !session.pauseSuggested &&
-    Math.random() < 0.2
-  ) {
-    session.pauseSuggested = true;
-    return true;
-  }
-
-  return false;
-}
-
 /* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
@@ -168,46 +132,20 @@ app.post("/webhook", async (req, res) => {
 
     if (!text) return res.sendStatus(200);
 
-    const intent = await detectIntent(text);
     const memories = await getMemory(userId);
     const userCity = extractCityFromMemory(memories);
 
-    /* ---------- ШАГ 2: ЖДЕМ РАЙОН ---------- */
+    /* ---------- 1. Если ждём район ---------- */
 
     if (sessionState[userId]?.stage === "awaiting_location") {
+
       sessionState[userId].location = text;
       sessionState[userId].stage = "searching";
-    }
-
-    /* ---------- SEARCH ---------- */
-
-    if (intent === "search") {
-
-      // если нет состояния — создаём
-      if (!sessionState[userId]) {
-        sessionState[userId] = {
-          intent: "search",
-          subject: text,
-          location: null,
-          stage: "awaiting_location",
-          missing: "location"
-        };
-      }
 
       const state = sessionState[userId];
 
-      // если район не указан
-      if (state.stage === "awaiting_location") {
-        await sendMessage(chatId, "В каком районе тебе удобнее?");
-        return res.sendStatus(200);
-      }
-
-      // формируем запрос
       let query = `${state.subject} ${state.location}`;
-
-      if (userCity) {
-        query += ` ${userCity}`;
-      }
+      if (userCity) query += ` ${userCity}`;
 
       const results = await searchPlaces(query);
 
@@ -224,22 +162,33 @@ app.post("/webhook", async (req, res) => {
         .join("\n\n");
 
       await sendMessage(chatId, reply);
-
-      await sendMessage(
-        chatId,
-        "Хочешь отфильтровать или посмотреть на карте?"
-      );
+      await sendMessage(chatId, "Хочешь отфильтровать или посмотреть на карте?");
 
       return res.sendStatus(200);
     }
 
-    /* ---------- ОЧИСТКА ---------- */
+    /* ---------- 2. Определяем интент ---------- */
 
-    if (text.toLowerCase().includes("спасибо")) {
-      delete sessionState[userId];
+    const intent = await detectIntent(text);
+
+    if (intent === "search") {
+
+      const cleanSubject = text
+        .replace(/найди|покажи|поиск|рядом|со мной/gi, "")
+        .trim();
+
+      sessionState[userId] = {
+        intent: "search",
+        subject: cleanSubject,
+        location: null,
+        stage: "awaiting_location"
+      };
+
+      await sendMessage(chatId, "В каком районе тебе удобнее?");
+      return res.sendStatus(200);
     }
 
-    /* ---------- CHAT ---------- */
+    /* ---------- 3. Обычный чат ---------- */
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -258,10 +207,6 @@ app.post("/webhook", async (req, res) => {
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || "Ошибка";
-
-    if (checkDialogueRhythm(userId)) {
-      await sendMessage(chatId, "Может сделать паузу?");
-    }
 
     await sendMessage(chatId, reply);
 
