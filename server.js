@@ -151,11 +151,12 @@ app.post("/webhook", async (req, res) => {
 
     /* ---------- ПОИСК САЛОНОВ ---------- */
 
-    if (text.toLowerCase().includes("найди салон")) {
-      const results = await searchPlaces("салон маникюра Киев");
+    if (text.toLowerCase().startsWith("найди")) {
+
+      const results = await searchPlaces(text);
 
       if (!results || results.length === 0) {
-        await sendMessage(chatId, "Не удалось найти салоны.");
+        await sendMessage(chatId, "Ничего не найдено по этому запросу.");
         return res.sendStatus(200);
       }
 
