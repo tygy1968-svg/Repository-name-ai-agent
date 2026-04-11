@@ -15,6 +15,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 let lastUpdateId = null;
 let chatHistory = {};
 let pendingMemory = {};
+let sessionStats = {}; // ← добавлено
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -131,6 +132,45 @@ async function searchPlaces(query) {
   }));
 }
 
+/* ---------- RHYTHM ---------- */
+
+function checkDialogueRhythm(userId) {
+  const now = new Date();
+
+  if (!sessionStats[userId]) {
+    sessionStats[userId] = {
+      startTime: now,
+      messageCount: 0,
+      pauseSuggested: false
+    };
+  }
+
+  const session = sessionStats[userId];
+  session.messageCount++;
+
+  const minutesActive =
+    (now - new Date(session.startTime)) / 1000 / 60;
+
+  const hour = now.getHours();
+
+  const lateNight = hour >= 1 && hour <= 4;
+  const longSession = session.messageCount > 12;
+  const longDuration = minutesActive > 20;
+
+  if (
+    lateNight &&
+    longSession &&
+    longDuration &&
+    !session.pauseSuggested &&
+    Math.random() < 0.2
+  ) {
+    session.pauseSuggested = true;
+    return true;
+  }
+
+  return false;
+}
+
 /* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
@@ -187,9 +227,8 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    /* ---------- АНАЛИЗ ПАМЯТИ (обновлённый) ---------- */
+    /* ---------- АНАЛИЗ ПАМЯТИ ---------- */
 
-    // НЕ анализируем память для поисковых запросов
     let analyzed = null;
 
     if (!text.toLowerCase().startsWith("найди")) {
@@ -256,6 +295,14 @@ ${factsText || "нет сохранённых фактов"}`
       "Произошла ошибка. Попробуй ещё раз.";
 
     chatHistory[userId].push({ role: "assistant", content: reply });
+
+    // ← добавлено перед отправкой
+    if (checkDialogueRhythm(userId)) {
+      await sendMessage(
+        chatId,
+        "Похоже, ты давно в работе. Может сделать паузу?"
+      );
+    }
 
     await sendMessage(chatId, reply);
     res.sendStatus(200);
