@@ -15,7 +15,9 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 let lastUpdateId = null;
 let chatHistory = {};
 let pendingMemory = {};
-let sessionStats = {}; // ← добавлено
+let sessionStats = {};
+
+/* ---------- SEND ---------- */
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -24,6 +26,8 @@ async function sendMessage(chatId, text) {
     body: JSON.stringify({ chat_id: chatId, text })
   });
 }
+
+/* ---------- MEMORY ---------- */
 
 async function getMemory(userId) {
   const res = await fetch(
@@ -66,7 +70,45 @@ async function saveMemory(userId, content) {
   });
 }
 
-/* ---------- РЕЖИМ D ---------- */
+/* ---------- INTENT ---------- */
+
+async function detectIntent(text) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `
+Определи намерение пользователя.
+Ответ строго одним словом:
+
+search — если это поиск мест, информации, объектов
+task — если это просьба выполнить действие (записать, позвонить, отправить)
+emotion — если выражено состояние, переживание, усталость
+memory — если сообщается факт о себе
+chat — обычный разговор
+
+Никаких пояснений.
+Только одно слово.
+`
+        },
+        { role: "user", content: text }
+      ]
+    })
+  });
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "chat";
+}
+
+/* ---------- ANALYZE MEMORY ---------- */
 
 async function analyzeMemoryWithReason(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -113,7 +155,7 @@ async function analyzeMemoryWithReason(text) {
   };
 }
 
-/* ---------- SERPAPI GOOGLE PLACES ---------- */
+/* ---------- SEARCH ---------- */
 
 async function searchPlaces(query) {
   if (!SERPAPI_KEY) return null;
@@ -189,9 +231,12 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
-    /* ---------- ПОИСК ---------- */
+    // 🔹 INTENT
+    const intent = await detectIntent(text);
 
-    if (text.toLowerCase().startsWith("найди")) {
+    /* ---------- SEARCH ---------- */
+
+    if (intent === "search") {
 
       const results = await searchPlaces(text);
 
@@ -208,7 +253,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* ---------- ПОДТВЕРЖДЕНИЕ ПАМЯТИ ---------- */
+    /* ---------- MEMORY CONFIRM ---------- */
 
     if (pendingMemory[userId]) {
       const lower = text.toLowerCase();
@@ -227,11 +272,11 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    /* ---------- АНАЛИЗ ПАМЯТИ ---------- */
+    /* ---------- MEMORY ANALYSIS ---------- */
 
     let analyzed = null;
 
-    if (!text.toLowerCase().startsWith("найди")) {
+    if (intent !== "search") {
       analyzed = await analyzeMemoryWithReason(text);
     }
 
@@ -248,7 +293,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* ---------- ОБЫЧНЫЙ ОТВЕТ ---------- */
+    /* ---------- NORMAL RESPONSE ---------- */
 
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
@@ -296,7 +341,6 @@ ${factsText || "нет сохранённых фактов"}`
 
     chatHistory[userId].push({ role: "assistant", content: reply });
 
-    // ← добавлено перед отправкой
     if (checkDialogueRhythm(userId)) {
       await sendMessage(
         chatId,
@@ -316,5 +360,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent with SerpAPI started on port", PORT);
+  console.log("Kuzya agent started on port", PORT);
 });
