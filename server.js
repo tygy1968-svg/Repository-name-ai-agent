@@ -8,7 +8,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const SERPAPI_KEY = process.env.SERPAPI_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
@@ -112,21 +112,21 @@ async function analyzeMemoryWithReason(text) {
   };
 }
 
-/* ---------- GOOGLE PLACES ---------- */
+/* ---------- SERPAPI GOOGLE PLACES ---------- */
 
 async function searchPlaces(query) {
-  if (!GOOGLE_API_KEY) return null;
+  if (!SERPAPI_KEY) return null;
 
-  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${GOOGLE_API_KEY}`;
+  const url = `https://serpapi.com/search.json?engine=google_maps&q=${encodeURIComponent(query)}&api_key=${SERPAPI_KEY}`;
 
   const res = await fetch(url);
   const data = await res.json();
 
-  if (!data.results || data.results.length === 0) return [];
+  if (!data.local_results || data.local_results.length === 0) return [];
 
-  return data.results.slice(0, 3).map(place => ({
-    name: place.name,
-    address: place.formatted_address,
+  return data.local_results.slice(0, 3).map(place => ({
+    name: place.title,
+    address: place.address,
     rating: place.rating || "нет рейтинга"
   }));
 }
@@ -152,7 +152,7 @@ app.post("/webhook", async (req, res) => {
     /* ---------- ПОИСК САЛОНОВ ---------- */
 
     if (text.toLowerCase().includes("найди салон")) {
-      const results = await searchPlaces(`салон маникюра Киев`);
+      const results = await searchPlaces("салон маникюра Киев");
 
       if (!results || results.length === 0) {
         await sendMessage(chatId, "Не удалось найти салоны.");
@@ -233,15 +233,8 @@ app.post("/webhook", async (req, res) => {
 Предлагай следующий шаг.
 Без шаблонных фраз.
 
-Перед тем как предложить выполнить действие (звонок, поиск, запись, отправка, получение данных),
-внутренне проверь: есть ли у тебя реальный модуль для этого действия.
-
-Если модуля нет — сразу скажи об этом.
-Не задавай уточняющих вопросов, если выполнить действие технически невозможно.
-Не симулируй возможности.
-
-Если у тебя нет прямого доступа к интернету, картам или внешним базам данных —
-прямо скажи об этом.
+Перед действием проверяй, есть ли реальный модуль.
+Если модуля нет — скажи прямо.
 
 Факты о пользователе:
 ${factsText || "нет сохранённых фактов"}`
@@ -270,5 +263,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent with Google Places started on port", PORT);
+  console.log("Kuzya agent with SerpAPI started on port", PORT);
 });
