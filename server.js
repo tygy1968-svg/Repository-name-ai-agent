@@ -149,7 +149,7 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
-    /* ---------- ПОИСК САЛОНОВ ---------- */
+    /* ---------- ПОИСК ---------- */
 
     if (text.toLowerCase().startsWith("найди")) {
 
@@ -187,9 +187,14 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    /* ---------- АНАЛИЗ ПАМЯТИ ---------- */
+    /* ---------- АНАЛИЗ ПАМЯТИ (обновлённый) ---------- */
 
-    const analyzed = await analyzeMemoryWithReason(text);
+    // НЕ анализируем память для поисковых запросов
+    let analyzed = null;
+
+    if (!text.toLowerCase().startsWith("найди")) {
+      analyzed = await analyzeMemoryWithReason(text);
+    }
 
     if (analyzed) {
       pendingMemory[userId] = analyzed;
