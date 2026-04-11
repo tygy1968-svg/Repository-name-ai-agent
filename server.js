@@ -8,6 +8,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
@@ -111,6 +112,25 @@ async function analyzeMemoryWithReason(text) {
   };
 }
 
+/* ---------- GOOGLE PLACES ---------- */
+
+async function searchPlaces(query) {
+  if (!GOOGLE_API_KEY) return null;
+
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${GOOGLE_API_KEY}`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (!data.results || data.results.length === 0) return [];
+
+  return data.results.slice(0, 3).map(place => ({
+    name: place.name,
+    address: place.formatted_address,
+    rating: place.rating || "нет рейтинга"
+  }));
+}
+
 /* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
@@ -129,6 +149,26 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
+    /* ---------- ПОИСК САЛОНОВ ---------- */
+
+    if (text.toLowerCase().includes("найди салон")) {
+      const results = await searchPlaces(`салон маникюра Киев`);
+
+      if (!results || results.length === 0) {
+        await sendMessage(chatId, "Не удалось найти салоны.");
+        return res.sendStatus(200);
+      }
+
+      const reply = results
+        .map((r, i) => `${i + 1}. ${r.name}\n${r.address}\nРейтинг: ${r.rating}`)
+        .join("\n\n");
+
+      await sendMessage(chatId, reply);
+      return res.sendStatus(200);
+    }
+
+    /* ---------- ПОДТВЕРЖДЕНИЕ ПАМЯТИ ---------- */
+
     if (pendingMemory[userId]) {
       const lower = text.toLowerCase();
 
@@ -146,6 +186,8 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    /* ---------- АНАЛИЗ ПАМЯТИ ---------- */
+
     const analyzed = await analyzeMemoryWithReason(text);
 
     if (analyzed) {
@@ -160,6 +202,8 @@ app.post("/webhook", async (req, res) => {
 
       return res.sendStatus(200);
     }
+
+    /* ---------- ОБЫЧНЫЙ ОТВЕТ ---------- */
 
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
@@ -226,5 +270,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent with mode D started on port", PORT);
+  console.log("Kuzya agent with Google Places started on port", PORT);
 });
