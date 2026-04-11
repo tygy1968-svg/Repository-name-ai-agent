@@ -13,11 +13,10 @@ const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
-let chatHistory = {};
-let pendingMemory = {};
 let sessionStats = {};
+let sessionState = {}; // ✅ Conversation State Layer
 
-/* ---------- SEND MESSAGE ---------- */
+/* ---------- SEND ---------- */
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -43,33 +42,6 @@ async function getMemory(userId) {
   return Array.isArray(data) ? data : [];
 }
 
-async function saveMemory(userId, content) {
-  if (!content) return;
-
-  const existing = await getMemory(userId);
-  const exists = existing.some(
-    m => m.content.toLowerCase() === content.toLowerCase()
-  );
-  if (exists) return;
-
-  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify([
-      {
-        user_id: String(userId),
-        role: "user",
-        content,
-        type: "anchor"
-      }
-    ])
-  });
-}
-
 /* ---------- CITY ---------- */
 
 function extractCityFromMemory(memories) {
@@ -78,21 +50,11 @@ function extractCityFromMemory(memories) {
   for (let i = 0; i < memories.length; i++) {
     const text = memories[i].content || "";
 
-    const cityMatch = text.match(
-      /город\s*:\s*([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i
-    );
+    const cityMatch = text.match(/город\s*:\s*([^\n,\.]+)/i);
+    if (cityMatch) return cityMatch[1].trim();
 
-    if (cityMatch) {
-      return cityMatch[1].trim().replace(/[,\.].*$/, "");
-    }
-
-    const liveMatch = text.match(
-      /жив[её]т?\s+в\s+([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i
-    );
-
-    if (liveMatch) {
-      return liveMatch[1].trim().replace(/[,\.].*$/, "");
-    }
+    const liveMatch = text.match(/жив[её]т?\s+в\s+([^\n,\.]+)/i);
+    if (liveMatch) return liveMatch[1].trim();
   }
 
   return null;
@@ -114,8 +76,7 @@ async function detectIntent(text) {
         {
           role: "system",
           content: `
-Определи намерение пользователя.
-Ответ строго одним словом:
+Определи намерение:
 
 search
 task
@@ -173,14 +134,11 @@ function checkDialogueRhythm(userId) {
 
   const hour = now.getHours();
 
-  const lateNight = hour >= 1 && hour <= 4;
-  const longSession = session.messageCount > 12;
-  const longDuration = minutesActive > 20;
-
   if (
-    lateNight &&
-    longSession &&
-    longDuration &&
+    hour >= 1 &&
+    hour <= 4 &&
+    session.messageCount > 12 &&
+    minutesActive > 20 &&
     !session.pauseSuggested &&
     Math.random() < 0.2
   ) {
@@ -207,74 +165,81 @@ app.post("/webhook", async (req, res) => {
     const chatId = message.chat.id;
     const userId = message.from.id;
     const text = (message.text || "").trim();
+
     if (!text) return res.sendStatus(200);
 
     const intent = await detectIntent(text);
-
     const memories = await getMemory(userId);
     const userCity = extractCityFromMemory(memories);
+
+    /* ---------- ШАГ 2: ЖДЕМ РАЙОН ---------- */
+
+    if (sessionState[userId]?.stage === "awaiting_location") {
+      sessionState[userId].location = text;
+      sessionState[userId].stage = "searching";
+    }
 
     /* ---------- SEARCH ---------- */
 
     if (intent === "search") {
 
-      // 🔥 УЛУЧШЕННАЯ ЛОГИКА РАЙОНА
-      const nearMentioned = /(рядом|поблизости|возле|near)/i.test(text);
+      // если нет состояния — создаём
+      if (!sessionState[userId]) {
+        sessionState[userId] = {
+          intent: "search",
+          subject: text,
+          location: null,
+          stage: "awaiting_location",
+          missing: "location"
+        };
+      }
 
-      const districtMentioned = /(подол|центр|оболонь|печерск|левый берег|правый берег|шевченковский|голосеевский)/i.test(text);
+      const state = sessionState[userId];
 
-      if (nearMentioned && !districtMentioned) {
+      // если район не указан
+      if (state.stage === "awaiting_location") {
         await sendMessage(chatId, "В каком районе тебе удобнее?");
         return res.sendStatus(200);
       }
 
-      let searchQuery = text;
+      // формируем запрос
+      let query = `${state.subject} ${state.location}`;
 
-      const cityMentioned = /(киев|києв|kyiv|львов|львів|lviv|одесса|одеса|odesa|харьков|харків|kharkiv|днепр|dnipro)/i.test(text);
-
-      if (!cityMentioned && userCity) {
-        searchQuery = `${text} ${userCity}`;
+      if (userCity) {
+        query += ` ${userCity}`;
       }
 
-      const results = await searchPlaces(searchQuery);
+      const results = await searchPlaces(query);
 
       if (!results || results.length === 0) {
-        await sendMessage(chatId, "Ничего не найдено по этому запросу.");
+        await sendMessage(chatId, "Ничего не найдено.");
+        delete sessionState[userId];
         return res.sendStatus(200);
       }
+
+      state.stage = "results_shown";
 
       const reply = results
         .map((r, i) => `${i + 1}. ${r.name}\n${r.address}\nРейтинг: ${r.rating}`)
         .join("\n\n");
 
       await sendMessage(chatId, reply);
-      return res.sendStatus(200);
-    }
-
-    /* ---------- MEMORY ANALYSIS ---------- */
-
-    let analyzed = null;
-
-    if (intent !== "search") {
-      analyzed = await analyzeMemoryWithReason(text);
-    }
-
-    if (analyzed) {
-      pendingMemory[userId] = analyzed;
 
       await sendMessage(
         chatId,
-        `Обнаружен долгосрочный факт:\n${analyzed.fact}\n\n` +
-        `Почему это важно:\n${analyzed.reason}\n\n` +
-        `Сохранить? (да / нет)`
+        "Хочешь отфильтровать или посмотреть на карте?"
       );
 
       return res.sendStatus(200);
     }
 
-    /* ---------- CHAT ---------- */
+    /* ---------- ОЧИСТКА ---------- */
 
-    const factsText = memories.map(x => x.content).join("\n");
+    if (text.toLowerCase().includes("спасибо")) {
+      delete sessionState[userId];
+    }
+
+    /* ---------- CHAT ---------- */
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -285,24 +250,17 @@ app.post("/webhook", async (req, res) => {
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          {
-            role: "system",
-            content: `Ты — Кузя, гибридный агент Юли.
-
-Говори естественно.
-Мысли структурно.
-Предлагай следующий шаг.`
-          },
+          { role: "system", content: "Ты помощник." },
           { role: "user", content: text }
         ]
       })
     });
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка.";
+    const reply = data.choices?.[0]?.message?.content || "Ошибка";
 
     if (checkDialogueRhythm(userId)) {
-      await sendMessage(chatId, "Похоже, ты давно в работе. Может сделать паузу?");
+      await sendMessage(chatId, "Может сделать паузу?");
     }
 
     await sendMessage(chatId, reply);
@@ -319,5 +277,5 @@ app.get("/", (req, res) => res.send("ok"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Kuzya agent FINAL started");
+  console.log("Agent with STATE ready");
 });
