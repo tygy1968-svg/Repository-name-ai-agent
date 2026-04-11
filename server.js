@@ -13,7 +13,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
 let chatHistory = {};
-let pendingMemory = {}; // ← режим D
+let pendingMemory = {};
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -66,7 +66,7 @@ async function saveMemory(userId, content) {
 
 /* ---------- РЕЖИМ D ---------- */
 
-asyn function analyzeMemoryWithReason(text) {
+async function analyzeMemoryWithReason(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -83,51 +83,17 @@ asyn function analyzeMemoryWithReason(text) {
 Определи, содержит ли сообщение пользователя информацию,
 которая может быть полезна в будущих разговорах.
 
-Предлагай сохранить ТОЛЬКО если это:
-1) Идентичность (кто он, чем занимается)
-2) Стратегический вектор (куда движется, что строит)
-3) Повторяющееся предпочтение
-4) Принцип взаимодействия
-5) Долгосрочная цель
+Если не нужно сохранять — верни: NONE
 
-НЕ предлагай сохранять если это:
-- эмоция момента
-- временное состояние
-- вопрос
-- гипотеза
-- разовая ситуация
-- шутка
-
-Если сохранять НЕ нужно — верни строго: NONE
-
-Если нужно — верни строго в формате:
-
-Факт: Категория: значение
-Причина: кратко объясни, почему это будет полезно учитывать в будущем
-
-Без лишнего текста.
+Если нужно:
+Факт: ...
+Причина: ...
 `
         },
         { role: "user", content: text }
       ]
     })
   });
-
-  const data = await res.json();
-  const result = data.choices?.[0]?.message?.content?.trim();
-  if (!result || result === "NONE") return null;
-
-  const lines = result.split("\n").map(x => x.trim());
-  const factLine = lines.find(x => x.startsWith("Факт:"));
-  const reasonLine = lines.find(x => x.startsWith("Причина:"));
-
-  if (!factLine) return null;
-
-  return {
-    fact: factLine.replace("Факт:", "").trim(),
-    reason: reasonLine ? reasonLine.replace("Причина:", "").trim() : ""
-  };
-}
 
   const data = await res.json();
   const result = data.choices?.[0]?.message?.content?.trim();
@@ -163,8 +129,6 @@ app.post("/webhook", async (req, res) => {
     const text = (message.text || "").trim();
     if (!text) return res.sendStatus(200);
 
-    /* ---------- Подтверждение сохранения ---------- */
-
     if (pendingMemory[userId]) {
       const lower = text.toLowerCase();
 
@@ -182,8 +146,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    /* ---------- Анализ на память ---------- */
-
     const analyzed = await analyzeMemoryWithReason(text);
 
     if (analyzed) {
@@ -198,8 +160,6 @@ app.post("/webhook", async (req, res) => {
 
       return res.sendStatus(200);
     }
-
-    /* ---------- Обычный ответ ---------- */
 
     const memory = await getMemory(userId);
     const factsText = memory.map(x => x.content).join("\n");
@@ -232,6 +192,9 @@ app.post("/webhook", async (req, res) => {
 Если ты не умеешь выполнить действие или у тебя нет инструмента —
 прямо скажи об этом и объясни, какой модуль или механизм нужно добавить для реализации.
 Не симулируй возможности.
+
+Если у тебя нет прямого доступа к интернету, картам или внешним базам данных —
+прямо скажи об этом. Не создавай видимость поиска.
 
 Факты о пользователе:
 ${factsText || "нет сохранённых фактов"}`
