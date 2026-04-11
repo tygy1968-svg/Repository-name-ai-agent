@@ -17,7 +17,7 @@ let chatHistory = {};
 let pendingMemory = {};
 let sessionStats = {};
 
-/* ---------- SEND ---------- */
+/* ---------- SEND MESSAGE ---------- */
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -41,25 +41,6 @@ async function getMemory(userId) {
   );
   const data = await res.json();
   return Array.isArray(data) ? data : [];
-}
-
-function extractCityFromMemory(memories) {
-  if (!memories || !memories.length) return null;
-
-  const cityRegex = /город\s*:\s*([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i;
-  const liveRegex = /жив[её]т?\s+в\s+([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i;
-
-  for (const item of memories) {
-    const text = item.content || "";
-
-    let match = text.match(cityRegex);
-    if (match) return match[1].trim().replace(/[,\.].*$/, "");
-
-    match = text.match(liveRegex);
-    if (match) return match[1].trim().replace(/[,\.].*$/, "");
-  }
-
-  return null;
 }
 
 async function saveMemory(userId, content) {
@@ -87,6 +68,34 @@ async function saveMemory(userId, content) {
       }
     ])
   });
+}
+
+/* ---------- CITY ---------- */
+
+function extractCityFromMemory(memories) {
+  if (!memories || !memories.length) return null;
+
+  for (let i = 0; i < memories.length; i++) {
+    const text = memories[i].content || "";
+
+    const cityMatch = text.match(
+      /город\s*:\s*([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i
+    );
+
+    if (cityMatch) {
+      return cityMatch[1].trim().replace(/[,\.].*$/, "");
+    }
+
+    const liveMatch = text.match(
+      /жив[её]т?\s+в\s+([A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-\s]+)/i
+    );
+
+    if (liveMatch) {
+      return liveMatch[1].trim().replace(/[,\.].*$/, "");
+    }
+  }
+
+  return null;
 }
 
 /* ---------- INTENT ---------- */
@@ -143,6 +152,45 @@ async function searchPlaces(query) {
   }));
 }
 
+/* ---------- RHYTHM ---------- */
+
+function checkDialogueRhythm(userId) {
+  const now = new Date();
+
+  if (!sessionStats[userId]) {
+    sessionStats[userId] = {
+      startTime: now,
+      messageCount: 0,
+      pauseSuggested: false
+    };
+  }
+
+  const session = sessionStats[userId];
+  session.messageCount++;
+
+  const minutesActive =
+    (now - new Date(session.startTime)) / 1000 / 60;
+
+  const hour = now.getHours();
+
+  const lateNight = hour >= 1 && hour <= 4;
+  const longSession = session.messageCount > 12;
+  const longDuration = minutesActive > 20;
+
+  if (
+    lateNight &&
+    longSession &&
+    longDuration &&
+    !session.pauseSuggested &&
+    Math.random() < 0.2
+  ) {
+    session.pauseSuggested = true;
+    return true;
+  }
+
+  return false;
+}
+
 /* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
@@ -150,11 +198,15 @@ app.post("/webhook", async (req, res) => {
     const update = req.body;
     if (!update.message) return res.sendStatus(200);
 
+    if (update.update_id === lastUpdateId) {
+      return res.sendStatus(200);
+    }
+    lastUpdateId = update.update_id;
+
     const message = update.message;
     const chatId = message.chat.id;
     const userId = message.from.id;
     const text = (message.text || "").trim();
-
     if (!text) return res.sendStatus(200);
 
     const intent = await detectIntent(text);
@@ -165,6 +217,16 @@ app.post("/webhook", async (req, res) => {
     /* ---------- SEARCH ---------- */
 
     if (intent === "search") {
+
+      // 🔥 УЛУЧШЕННАЯ ЛОГИКА РАЙОНА
+      const nearMentioned = /(рядом|поблизости|возле|near)/i.test(text);
+
+      const districtMentioned = /(подол|центр|оболонь|печерск|левый берег|правый берег|шевченковский|голосеевский)/i.test(text);
+
+      if (nearMentioned && !districtMentioned) {
+        await sendMessage(chatId, "В каком районе тебе удобнее?");
+        return res.sendStatus(200);
+      }
 
       let searchQuery = text;
 
@@ -189,7 +251,28 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* ---------- NORMAL RESPONSE ---------- */
+    /* ---------- MEMORY ANALYSIS ---------- */
+
+    let analyzed = null;
+
+    if (intent !== "search") {
+      analyzed = await analyzeMemoryWithReason(text);
+    }
+
+    if (analyzed) {
+      pendingMemory[userId] = analyzed;
+
+      await sendMessage(
+        chatId,
+        `Обнаружен долгосрочный факт:\n${analyzed.fact}\n\n` +
+        `Почему это важно:\n${analyzed.reason}\n\n` +
+        `Сохранить? (да / нет)`
+      );
+
+      return res.sendStatus(200);
+    }
+
+    /* ---------- CHAT ---------- */
 
     const factsText = memories.map(x => x.content).join("\n");
 
@@ -204,7 +287,11 @@ app.post("/webhook", async (req, res) => {
         messages: [
           {
             role: "system",
-            content: `Ты — Кузя`
+            content: `Ты — Кузя, гибридный агент Юли.
+
+Говори естественно.
+Мысли структурно.
+Предлагай следующий шаг.`
           },
           { role: "user", content: text }
         ]
@@ -212,15 +299,25 @@ app.post("/webhook", async (req, res) => {
     });
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка";
+    const reply = data.choices?.[0]?.message?.content || "Ошибка.";
+
+    if (checkDialogueRhythm(userId)) {
+      await sendMessage(chatId, "Похоже, ты давно в работе. Может сделать паузу?");
+    }
 
     await sendMessage(chatId, reply);
+
     res.sendStatus(200);
 
   } catch (err) {
-    console.error(err);
+    console.error("ERROR:", err);
     res.sendStatus(200);
   }
 });
 
-app.listen(3000);
+app.get("/", (req, res) => res.send("ok"));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("Kuzya agent FINAL started");
+});
