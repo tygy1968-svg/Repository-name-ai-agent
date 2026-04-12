@@ -41,31 +41,11 @@ async function getFullMemory(userId) {
   }
 }
 
-async function saveDialog(userId, userMsg, botReply) {
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify([
-        {
-          user_id: String(userId),
-          role: "interaction",
-          type: "dialog",
-          content: `Пользователь: ${userMsg}\nКузя: ${botReply}`
-        }
-      ])
-    });
-  } catch (e) {
-    console.error("saveDialog error:", e);
-  }
-}
-
 async function saveMemory(userId, fact) {
   try {
+    const existing = await getFullMemory(userId);
+    if (existing.some(m => m.content === fact)) return;
+
     await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
       method: "POST",
       headers: {
@@ -118,7 +98,6 @@ async function extractFacts(text) {
       return [];
     }
   } catch (e) {
-    console.error("extractFacts error:", e);
     return [];
   }
 }
@@ -135,7 +114,7 @@ async function generateResponse(userId, userText, memory) {
 ПАМЯТЬ:
 ${memoryContext || "нет"}
 
-Используй память для контекста. Отвечай прямо.`;
+Используй память. Отвечай прямо.`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -155,11 +134,8 @@ ${memoryContext || "нет"}
     });
 
     const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка";
-
-    return reply;
+    return data.choices?.[0]?.message?.content || "Ошибка";
   } catch (e) {
-    console.error("generateResponse error:", e);
     return "Ошибка";
   }
 }
@@ -177,7 +153,6 @@ app.post("/webhook", async (req, res) => {
     const reply = await generateResponse(userId, text, memory);
 
     await sendMessage(chatId, reply);
-    await saveDialog(userId, text, reply);
 
     const facts = await extractFacts(text);
     for (const fact of facts) {
@@ -187,7 +162,6 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 
   } catch (e) {
-    console.error("Webhook error:", e);
     res.sendStatus(200);
   }
 });
