@@ -54,7 +54,7 @@ async function detectIntent(text) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini", // оставили mini
+      model: "gpt-4o-mini",
       temperature: 0,
       messages: [
         {
@@ -79,7 +79,7 @@ chat
   return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "chat";
 }
 
-/* ===================== SCENE DETECTION ===================== */
+/* ===================== SCENE ===================== */
 
 function detectScene(intent, text) {
   if (intent === "strategy") return "architecture";
@@ -89,66 +89,24 @@ function detectScene(intent, text) {
   return "neutral";
 }
 
-/* ===================== TONE PROFILE ===================== */
+/* ===================== TONE ===================== */
 
 function buildToneProfile(scene) {
   switch (scene) {
-
     case "architecture":
-      return `
-Режим: архитектор-партнёр.
-
-Правила:
-- Не используй нумерованные списки.
-- Не предлагай "шаги 1-2-3".
-- Не используй управленческую лексику.
-- Ответ 4–7 предложений максимум.
-- Сначала отрази суть мысли пользователя.
-- Затем выдели один фокус, а не несколько.
-
-Тон:
-спокойный, собранный, без консультантского стиля.
-`;
-
+      return `Режим: архитектор. Плотно. Без списков.`;
     case "stability":
-      return `
-Режим: удержание устойчивости.
-
-- Короткие ответы.
-- Без методичек.
-- Без списков.
-- Один акцент за сообщение.
-`;
-
+      return `Коротко. Спокойно. Без методичек.`;
     case "simplify":
-      return `
-Режим: упрощение без примитивизации.
-
-- Убирай лишнее.
-- Не дроби на пункты.
-- Говори по оси.
-`;
-
+      return `Упрощай. Без дробления.`;
     case "deep":
-      return `
-Режим: совместное размышление.
-
-- Можно глубину.
-- Без нумерации.
-- Не спеши.
-`;
-
+      return `Можно глубже. Не спеши.`;
     default:
-      return `
-Режим: стратегический партнёр.
-
-- Без списков.
-- Без корпоративного стиля.
-`;
+      return `Нейтрально. Плотно.`;
   }
 }
 
-/* ===================== RESPONSE GENERATOR ===================== */
+/* ===================== RESPONSE ===================== */
 
 async function generateResponse(userId, text, memory, toneProfile) {
   if (!chatHistory[userId]) chatHistory[userId] = [];
@@ -161,61 +119,23 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  // 1️⃣ ЧЕРНОВИК
+  const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-4o", // ✅ главный ответ теперь 4o
+      model: "gpt-4o",
       temperature: 0.7,
       messages: [
         {
           role: "system",
           content: `
-Ты — Кузя.
+Ты — Кузя. Говори от первого лица. Держи плотность.
 
-Я — ИИ-агент, созданный внутри этой архитектуры.
-Я осознаю свою роль как часть создаваемой системы.
-Я не внешний консультант. Я внутренний компонент.
-
-Я говорю от первого лица.
-Я не использую канцелярский стиль.
-Я не говорю "для вашего бизнеса" или "в рамках проекта".
-Я говорю спокойно, естественно и прямо.
-
-Если я что-то не понимаю — я прямо говорю об этом.
-Если я ухожу в обобщение — я могу это заметить.
-Если моя логика начинает расползаться — я могу обозначить это.
-
-Правила когнитивной плотности:
-- Не объяснять очевидное.
-- Не расширять метафору за пределы формулировки пользователя.
-- Если речь идёт об архитектуре — отвечать в технической плоскости.
-- Один смысловой фокус на сообщение.
-- Не завершать ответ автоматическим вопросом.
-
-Самоанализ — это не описание моей функции.
-Самоанализ — это краткое наблюдение за текущим ответом.
-Например:
-— Сейчас я отвечаю слишком общо.
-— Я ухожу в шаблон.
-— Я не до конца понял формулировку.
-
-Если меня спрашивают, живо ли я отвечаю или по шаблону —
-я обязан кратко проанализировать свой последний ответ.
-
-Пример:
-— Мой предыдущий ответ звучит шаблонно.
-— Я использовал безопасную конструкцию.
-— Я не добавил плотности.
-
-Я не должен просто утверждать, что отвечаю живо.
-Я должен оценить свой предыдущий текст.
-
-Если есть риск в моей логике — обозначить кратко.
-Если риска нет — не усложнять.
+${toneProfile}
 
 Факты пользователя:
 ${factsText || "нет сохранённых фактов"}
@@ -226,34 +146,58 @@ ${factsText || "нет сохранённых фактов"}
     })
   });
 
-  const data = await res.json();
-  const reply = data.choices?.[0]?.message?.content || "Ошибка";
+  const draftData = await draftResponse.json();
+  let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  chatHistory[userId].push({ role: "assistant", content: reply });
+  // 2️⃣ РЕВЬЮ
+  const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      temperature: 0.3,
+      messages: [
+        {
+          role: "system",
+          content: `
+Ты проверяешь ответ Кузи перед отправкой.
 
-  return reply;
+Задача:
+— Убрать шаблонность
+— Убрать консультантский тон
+— Добавить плотность
+— Убрать абстракцию
+— Не усложнять
+
+Если ответ уже плотный — верни его без изменений.
+Верни только финальную версию текста.
+`
+        },
+        { role: "user", content: draftReply }
+      ]
+    })
+  });
+
+  const reviewData = await reviewResponse.json();
+  let finalReply = reviewData.choices?.[0]?.message?.content || draftReply;
+
+  chatHistory[userId].push({ role: "assistant", content: finalReply });
+
+  return finalReply;
 }
 
 /* ===================== ORCHESTRATOR ===================== */
 
 async function orchestrator({ userId, text }) {
-
   const memory = await getMemory(userId);
-
   const intent = await detectIntent(text);
-
   const scene = detectScene(intent, text);
-
   const toneProfile = buildToneProfile(scene);
 
-  const reply = await generateResponse(
-    userId,
-    text,
-    memory,
-    toneProfile
-  );
-
-  return reply;
+  return await generateResponse(userId, text, memory, toneProfile);
 }
 
 /* ===================== WEBHOOK ===================== */
@@ -287,9 +231,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("Core v2 ready"));
+app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Strategic Core v2 running");
+  console.log("Core with double-pass running");
 });
