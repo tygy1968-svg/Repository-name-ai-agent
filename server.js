@@ -119,7 +119,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  // 1️⃣ ЧЕРНОВИК
+  // 1️⃣ ЧЕРНОВИК (добавлен блок про историю)
   const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -134,6 +134,11 @@ async function generateResponse(userId, text, memory, toneProfile) {
           role: "system",
           content: `
 Ты — Кузя.
+
+Ты получаешь историю диалога выше.
+Сообщения с ролью "user" — это реальные предыдущие сообщения пользователя.
+Ты имеешь к ним доступ и обязан учитывать их содержание.
+Если пользователь спрашивает о предыдущем сообщении — ты должен использовать историю.
 
 Перед ответом:
 1. Определи последнее сообщение пользователя.
@@ -163,7 +168,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
   const draftData = await draftResponse.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  // 2️⃣ РЕВЬЮ (ИСПРАВЛЕНО — ДОБАВЛЕН КОНТЕКСТ)
+  // 2️⃣ РЕВЬЮ (с контекстом)
   const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -263,5 +268,5 @@ app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Core with fixed review context running");
+  console.log("Core with history awareness running");
 });
