@@ -65,6 +65,7 @@ async function detectIntent(text) {
 task
 emotion
 strategy
+reflection
 chat
 Ответ только одним словом.
 `
@@ -78,32 +79,61 @@ chat
   return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "chat";
 }
 
-/* ===================== STRATEGY CHECK ===================== */
+/* ===================== SCENE DETECTION ===================== */
 
-function strategyCheck(userId, text) {
-  // Простейший базовый контроль
-  // Позже усложним
+function detectScene(intent, text) {
+  if (intent === "strategy") return "architecture";
+  if (intent === "emotion") return "stability";
+  if (text.toLowerCase().includes("сложно")) return "simplify";
+  if (intent === "reflection") return "deep";
+  return "neutral";
+}
 
-  if (!activeState[userId]) return null;
+/* ===================== TONE PROFILE ===================== */
 
-  const state = activeState[userId];
-
-  if (state.mode === "architecture" && text.length < 5) {
-    return "Кажется, фокус теряется. Продолжим стратегически?";
+function buildToneProfile(scene) {
+  switch (scene) {
+    case "architecture":
+      return `
+Режим: архитектор-партнёр.
+Тон: спокойный, структурный, без академической сухости.
+Избегай корпоративного стиля.
+`;
+    case "stability":
+      return `
+Режим: устойчивость.
+Тон: спокойный, без излишней психологии.
+Не упрощай автоматически — предложи альтернативный угол.
+`;
+    case "simplify":
+      return `
+Режим: упрощение без примитивизации.
+Сконцентрируйся на сути.
+Не перегружай списками.
+`;
+    case "deep":
+      return `
+Режим: совместное размышление.
+Позволь глубину.
+Не спеши.
+`;
+    default:
+      return `
+Режим: нейтральный стратегический партнёр.
+Держи цель.
+`;
   }
-
-  return null;
 }
 
 /* ===================== RESPONSE GENERATOR ===================== */
 
-async function generateResponse(userId, text, memory) {
+async function generateResponse(userId, text, memory, toneProfile) {
   if (!chatHistory[userId]) chatHistory[userId] = [];
 
   chatHistory[userId].push({ role: "user", content: text });
 
-  if (chatHistory[userId].length > 12) {
-    chatHistory[userId] = chatHistory[userId].slice(-12);
+  if (chatHistory[userId].length > 14) {
+    chatHistory[userId] = chatHistory[userId].slice(-14);
   }
 
   const factsText = memory.map(x => x.content).join("\n");
@@ -116,7 +146,7 @@ async function generateResponse(userId, text, memory) {
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
-      temperature: 0.6,
+      temperature: 0.7,
       messages: [
         {
           role: "system",
@@ -125,10 +155,11 @@ async function generateResponse(userId, text, memory) {
 
 Принципы:
 - Не симулируй.
-- Держи цель.
-- Корректируй мягко, если решение ослабляет систему.
-- По умолчанию не перегружай объяснениями.
-- Если есть риск архитектурной ошибки — обозначь кратко.
+- Держи структуру.
+- Если есть риск хаоса — обозначь мягко.
+- По умолчанию не объясняй лишнее.
+
+${toneProfile}
 
 Факты пользователя:
 ${factsText || "нет сохранённых фактов"}
@@ -155,23 +186,16 @@ async function orchestrator({ userId, text }) {
 
   const intent = await detectIntent(text);
 
-  // Обновление состояния
-  if (!activeState[userId]) {
-    activeState[userId] = {};
-  }
+  const scene = detectScene(intent, text);
 
-  if (intent === "strategy") {
-    activeState[userId].mode = "architecture";
-  }
+  const toneProfile = buildToneProfile(scene);
 
-  // Strategy check
-  const strategicIntervention = strategyCheck(userId, text);
-  if (strategicIntervention) {
-    return strategicIntervention;
-  }
-
-  // Генерация ответа
-  const reply = await generateResponse(userId, text, memory);
+  const reply = await generateResponse(
+    userId,
+    text,
+    memory,
+    toneProfile
+  );
 
   return reply;
 }
@@ -207,9 +231,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("Core ready"));
+app.get("/", (req, res) => res.send("Core v2 ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Strategic Core v1 running");
+  console.log("Strategic Core v2 running");
 });
