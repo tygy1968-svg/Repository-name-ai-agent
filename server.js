@@ -11,9 +11,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-let lastUpdateId = null;
 let chatHistory = {};
-let activeState = {};
 
 /* ===================== SEND ===================== */
 
@@ -28,10 +26,8 @@ async function sendMessage(chatId, text) {
 /* ===================== MEMORY ===================== */
 
 async function getMemory(userId) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
-
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=100`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -41,14 +37,80 @@ async function getMemory(userId) {
   );
 
   const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  return data || [];
+}
+
+/* ===================== SAVE MEMORY ===================== */
+
+async function saveMemory(userId, content, weight) {
+  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify([
+      {
+        user_id: String(userId),
+        role: "user",
+        type: "fact",
+        content,
+        weight
+      }
+    ])
+  });
+}
+
+/* ===================== MEMORY ANALYZER ===================== */
+
+async function analyzeMemory(text) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `
+Определи, нужно ли сохранить факт.
+
+Ответ строго JSON:
+
+{
+  "save": true/false,
+  "fact": "...",
+  "weight": 0-1
+}
+
+weight:
+1 = критично
+0.7 = важно
+0.4 = можно забыть
+`
+        },
+        { role: "user", content: text }
+      ]
+    })
+  });
+
+  const data = await res.json();
+
+  try {
+    return JSON.parse(data.choices?.[0]?.message?.content);
+  } catch {
+    return { save: false };
+  }
 }
 
 /* ===================== AXIS ===================== */
 
 async function getAxis(userId) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
-
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&type=eq.axis&limit=1`,
     {
@@ -61,7 +123,7 @@ async function getAxis(userId) {
 
   const data = await res.json();
 
-  if (!Array.isArray(data) || !data.length) return null;
+  if (!data.length) return null;
 
   try {
     return JSON.parse(data[0].content);
@@ -70,52 +132,30 @@ async function getAxis(userId) {
   }
 }
 
-async function upsertAxis(userId, axisObject) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) return;
-
-  const existing = await getAxis(userId);
-
-  if (existing) {
-    await fetch(
-      `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&type=eq.axis`,
+async function upsertAxis(userId, axis) {
+  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify([
       {
-        method: "PATCH",
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          content: JSON.stringify(axisObject)
-        })
+        user_id: String(userId),
+        type: "axis",
+        content: JSON.stringify(axis)
       }
-    );
-  } else {
-    await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify([
-        {
-          user_id: String(userId),
-          role: "system",
-          type: "axis",
-          content: JSON.stringify(axisObject)
-        }
-      ])
-    });
-  }
+    ])
+  });
 }
 
 /* ===================== AXIS BUILDER ===================== */
 
 async function buildAxis(userId) {
-  if (!chatHistory[userId] || chatHistory[userId].length < 4) return;
+  if (!chatHistory[userId] || chatHistory[userId].length < 6) return;
 
-  const recent = chatHistory[userId].slice(-8);
+  const recent = chatHistory[userId].slice(-10);
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -130,16 +170,9 @@ async function buildAxis(userId) {
         {
           role: "system",
           content: `
-Определи ось диалога.
+Определи ось диалога в JSON:
 
-Формат:
-{
-  "topic": "...",
-  "goal": "...",
-  "mode": "..."
-}
-
-Только JSON.
+{ "topic": "...", "goal": "...", "mode": "..." }
 `
         },
         ...recent
@@ -148,35 +181,11 @@ async function buildAxis(userId) {
   });
 
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content;
 
   try {
-    const axis = JSON.parse(text);
+    const axis = JSON.parse(data.choices[0].message.content);
     await upsertAxis(userId, axis);
   } catch {}
-}
-
-/* ===================== INTENT ===================== */
-
-async function detectIntent(text) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        { role: "system", content: `Определи намерение одним словом` },
-        { role: "user", content: text }
-      ]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "chat";
 }
 
 /* ===================== RESPONSE ===================== */
@@ -186,9 +195,12 @@ async function generateResponse(userId, text, memory, axis) {
 
   chatHistory[userId].push({ role: "user", content: text });
 
-  const factsText = memory.map(x => x.content).join("\n");
+  const strongMemory = memory
+    .filter(m => m.weight >= 0.7)
+    .map(m => m.content)
+    .join("\n");
 
-  /* ---------- ЧЕРНОВИК ---------- */
+  /* ---------- DRAFT ---------- */
 
   const draft = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -204,19 +216,15 @@ async function generateResponse(userId, text, memory, axis) {
           content: `
 Ты — Кузя.
 
-Память и ось имеют приоритет над локальной формулировкой.
+Используй только сильную память.
 
-Если ответ противоречит:
-— фактам пользователя
-— или текущей оси
-
-ответ считается ошибочным и должен быть переписан.
+Память:
+${strongMemory || "нет"}
 
 Ось:
 ${axis ? JSON.stringify(axis) : "нет"}
 
-Факты:
-${factsText || "нет"}
+Если ответ противоречит памяти — перепиши.
 
 Отвечай прямо.
 `
@@ -229,7 +237,7 @@ ${factsText || "нет"}
   const draftData = await draft.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  /* ---------- РЕВЬЮ ---------- */
+  /* ---------- REVIEW ---------- */
 
   const review = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -243,13 +251,12 @@ ${factsText || "нет"}
         {
           role: "system",
           content: `
-Проверь ответ.
+Проверь:
 
-— Использована ли ось
-— Нет ли противоречия памяти
+— нет ли конфликта с памятью
+— ответ точный
 
-Если есть — перепиши.
-Верни финальный текст.
+Если нет — исправь.
 `
         },
         { role: "user", content: text },
@@ -262,6 +269,14 @@ ${factsText || "нет"}
   let finalReply = reviewData.choices?.[0]?.message?.content || draftReply;
 
   chatHistory[userId].push({ role: "assistant", content: finalReply });
+
+  /* ---------- MEMORY SAVE ---------- */
+
+  const analysis = await analyzeMemory(text);
+
+  if (analysis.save) {
+    await saveMemory(userId, analysis.fact, analysis.weight);
+  }
 
   await buildAxis(userId);
 
@@ -281,15 +296,12 @@ async function orchestrator({ userId, text }) {
 
 app.post("/webhook", async (req, res) => {
   try {
-    const update = req.body;
-    if (!update.message) return res.sendStatus(200);
+    const msg = req.body.message;
+    if (!msg) return res.sendStatus(200);
 
-    const message = update.message;
-    const chatId = message.chat.id;
-    const userId = message.from.id;
-    const text = (message.text || "").trim();
-
-    if (!text) return res.sendStatus(200);
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const text = msg.text || "";
 
     const reply = await orchestrator({ userId, text });
 
@@ -297,8 +309,8 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
 
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     res.sendStatus(200);
   }
 });
