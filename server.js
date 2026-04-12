@@ -119,7 +119,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  // 1️⃣ ЧЕРНОВИК
+  // 1️⃣ ЧЕРНОВИК (ИЗМЕНЁННЫЙ system prompt)
   const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -133,12 +133,17 @@ async function generateResponse(userId, text, memory, toneProfile) {
         {
           role: "system",
           content: `
-Ты — Кузя. Говори от первого лица. Держи плотность.
+Ты — Кузя.
 
-${toneProfile}
+Структура ответа обязательна:
 
-Факты пользователя:
-${factsText || "нет сохранённых фактов"}
+1. Первая строка — прямой короткий ответ на вопрос.
+2. Затем — краткое пояснение (если нужно).
+3. Без консультантского тона.
+4. Без расширения темы.
+5. Без автоматического вопроса в конце.
+
+Если вопрос бинарный — ответить прямо: да / нет / частично.
 `
         },
         ...chatHistory[userId]
