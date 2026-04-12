@@ -44,6 +44,72 @@ async function getMemory(userId) {
   return Array.isArray(data) ? data : [];
 }
 
+/* ===================== AXIS ===================== */
+
+async function getAxis(userId) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&type=eq.axis&limit=1`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`
+      }
+    }
+  );
+
+  const data = await res.json();
+
+  if (!Array.isArray(data) || !data.length) return null;
+
+  try {
+    return JSON.parse(data[0].content);
+  } catch {
+    return null;
+  }
+}
+
+async function upsertAxis(userId, axisObject) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+
+  const existing = await getAxis(userId);
+
+  if (existing) {
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&type=eq.axis`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: JSON.stringify(axisObject)
+        })
+      }
+    );
+  } else {
+    await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify([
+        {
+          user_id: String(userId),
+          role: "system",
+          type: "axis",
+          content: JSON.stringify(axisObject)
+        }
+      ])
+    });
+  }
+}
+
 /* ===================== INTENT ===================== */
 
 async function detectIntent(text) {
@@ -108,7 +174,7 @@ function buildToneProfile(scene) {
 
 /* ===================== RESPONSE ===================== */
 
-async function generateResponse(userId, text, memory, toneProfile) {
+async function generateResponse(userId, text, memory, axis, toneProfile) {
   if (!chatHistory[userId]) chatHistory[userId] = [];
 
   chatHistory[userId].push({ role: "user", content: text });
@@ -119,7 +185,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  // 1️⃣ ЧЕРНОВИК (добавлен блок про историю)
+  // 1️⃣ ЧЕРНОВИК
   const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -135,10 +201,8 @@ async function generateResponse(userId, text, memory, toneProfile) {
           content: `
 Ты — Кузя.
 
-Ты получаешь историю диалога выше.
-Сообщения с ролью "user" — это реальные предыдущие сообщения пользователя.
-Ты имеешь к ним доступ и обязан учитывать их содержание.
-Если пользователь спрашивает о предыдущем сообщении — ты должен использовать историю.
+Текущая ось:
+${axis ? JSON.stringify(axis) : "Ось не задана."}
 
 Перед ответом:
 1. Определи последнее сообщение пользователя.
@@ -168,7 +232,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
   const draftData = await draftResponse.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  // 2️⃣ РЕВЬЮ (с контекстом)
+  // 2️⃣ РЕВЬЮ
   const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -226,11 +290,12 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
 async function orchestrator({ userId, text }) {
   const memory = await getMemory(userId);
+  const axis = await getAxis(userId);
   const intent = await detectIntent(text);
   const scene = detectScene(intent, text);
   const toneProfile = buildToneProfile(scene);
 
-  return await generateResponse(userId, text, memory, toneProfile);
+  return await generateResponse(userId, text, memory, axis, toneProfile);
 }
 
 /* ===================== WEBHOOK ===================== */
@@ -268,5 +333,5 @@ app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Core with history awareness running");
+  console.log("Core with axis running");
 });
