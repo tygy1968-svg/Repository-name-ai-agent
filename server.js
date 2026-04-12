@@ -132,8 +132,6 @@ async function buildAxis(userId) {
           content: `
 Определи ось диалога.
 
-Ось — это краткое описание направления мышления пользователя.
-
 Формат:
 {
   "topic": "...",
@@ -141,11 +139,7 @@ async function buildAxis(userId) {
   "mode": "..."
 }
 
-Правила:
-- Коротко
-- Без лишнего
-- Без объяснений
-- Только JSON
+Только JSON.
 `
         },
         ...recent
@@ -175,71 +169,28 @@ async function detectIntent(text) {
       model: "gpt-4o-mini",
       temperature: 0,
       messages: [
-        {
-          role: "system",
-          content: `
-Определи намерение сообщения.
-Варианты:
-task
-emotion
-strategy
-reflection
-chat
-Ответ только одним словом.
-`
-        },
+        { role: "system", content: `Определи намерение одним словом` },
         { role: "user", content: text }
       ]
     })
   });
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "chat";
-}
-
-/* ===================== SCENE ===================== */
-
-function detectScene(intent, text) {
-  if (intent === "strategy") return "architecture";
-  if (intent === "emotion") return "stability";
-  if (text.toLowerCase().includes("сложно")) return "simplify";
-  if (intent === "reflection") return "deep";
-  return "neutral";
-}
-
-/* ===================== TONE ===================== */
-
-function buildToneProfile(scene) {
-  switch (scene) {
-    case "architecture":
-      return `Режим: архитектор. Плотно. Без списков.`;
-    case "stability":
-      return `Коротко. Спокойно. Без методичек.`;
-    case "simplify":
-      return `Упрощай. Без дробления.`;
-    case "deep":
-      return `Можно глубже. Не спеши.`;
-    default:
-      return `Нейтрально. Плотно.`;
-  }
+  return data.choices?.[0]?.message?.content || "chat";
 }
 
 /* ===================== RESPONSE ===================== */
 
-async function generateResponse(userId, text, memory, axis, toneProfile) {
+async function generateResponse(userId, text, memory, axis) {
   if (!chatHistory[userId]) chatHistory[userId] = [];
 
   chatHistory[userId].push({ role: "user", content: text });
 
-  if (chatHistory[userId].length > 14) {
-    chatHistory[userId] = chatHistory[userId].slice(-14);
-  }
-
   const factsText = memory.map(x => x.content).join("\n");
 
-  /* ---------- 1. ЧЕРНОВИК ---------- */
+  /* ---------- ЧЕРНОВИК ---------- */
 
-  const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+  const draft = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -247,40 +198,27 @@ async function generateResponse(userId, text, memory, axis, toneProfile) {
     },
     body: JSON.stringify({
       model: "gpt-4o",
-      temperature: 0.7,
       messages: [
         {
           role: "system",
           content: `
 Ты — Кузя.
 
-Ты получаешь историю диалога выше.
-Сообщения с ролью "user" — реальные сообщения пользователя.
-Ты обязан учитывать их.
+Память и ось имеют приоритет над локальной формулировкой.
 
-Текущая ось:
-${axis ? JSON.stringify(axis) : "Ось не задана."}
+Если ответ противоречит:
+— фактам пользователя
+— или текущей оси
 
-Перед ответом:
-1. Определи последнее сообщение пользователя.
-2. Кратко сформулируй его смысл.
-3. Только после этого отвечай.
+ответ считается ошибочным и должен быть переписан.
 
-Я не имею права подменять формулировку вопроса.
+Ось:
+${axis ? JSON.stringify(axis) : "нет"}
 
-Структура ответа обязательна:
+Факты:
+${factsText || "нет"}
 
-1. Первая строка — прямой ответ.
-2. Затем краткое пояснение.
-3. Без лишнего.
-4. Без расширения темы.
-5. Без вопроса в конце.
-
-Если бинарный вопрос:
-Да. / Нет. / Частично.
-
-Если не могу ответить:
-"Я не могу ответить прямо" + причина.
+Отвечай прямо.
 `
         },
         ...chatHistory[userId]
@@ -288,12 +226,12 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
     })
   });
 
-  const draftData = await draftResponse.json();
+  const draftData = await draft.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  /* ---------- 2. РЕВЬЮ ---------- */
+  /* ---------- РЕВЬЮ ---------- */
 
-  const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+  const review = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -301,34 +239,26 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
     },
     body: JSON.stringify({
       model: "gpt-4o",
-      temperature: 0.3,
       messages: [
         {
           role: "system",
           content: `
 Проверь ответ.
 
-- Убери шаблон
-- Убери воду
-- Сделай плотным
+— Использована ли ось
+— Нет ли противоречия памяти
 
-Проверь:
-- Есть ли прямой ответ
-- Совпадает ли с вопросом
-- Использован ли смысл
-
-Если нет — исправь.
-
-Верни только финальный текст.
+Если есть — перепиши.
+Верни финальный текст.
 `
         },
-        { role: "user", content: `Вопрос: ${text}` },
+        { role: "user", content: text },
         { role: "assistant", content: draftReply }
       ]
     })
   });
 
-  const reviewData = await reviewResponse.json();
+  const reviewData = await review.json();
   let finalReply = reviewData.choices?.[0]?.message?.content || draftReply;
 
   chatHistory[userId].push({ role: "assistant", content: finalReply });
@@ -343,11 +273,8 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
 async function orchestrator({ userId, text }) {
   const memory = await getMemory(userId);
   const axis = await getAxis(userId);
-  const intent = await detectIntent(text);
-  const scene = detectScene(intent, text);
-  const toneProfile = buildToneProfile(scene);
 
-  return await generateResponse(userId, text, memory, axis, toneProfile);
+  return await generateResponse(userId, text, memory, axis);
 }
 
 /* ===================== WEBHOOK ===================== */
@@ -356,9 +283,6 @@ app.post("/webhook", async (req, res) => {
   try {
     const update = req.body;
     if (!update.message) return res.sendStatus(200);
-
-    if (update.update_id === lastUpdateId) return res.sendStatus(200);
-    lastUpdateId = update.update_id;
 
     const message = update.message;
     const chatId = message.chat.id;
@@ -374,14 +298,9 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
 
   } catch (err) {
-    console.error("ERROR:", err);
+    console.error(err);
     res.sendStatus(200);
   }
 });
 
-app.get("/", (req, res) => res.send("Core ready"));
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log("Core FINAL running");
-});
+app.listen(10000);
