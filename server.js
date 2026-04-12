@@ -11,8 +11,6 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-let chatHistory = {};
-
 /* ===================== SEND ===================== */
 
 async function sendMessage(chatId, text) {
@@ -23,273 +21,174 @@ async function sendMessage(chatId, text) {
   });
 }
 
-/* ===================== MEMORY ===================== */
+/* ===================== GET MEMORY ===================== */
 
-async function getMemory(userId) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=100`,
-    {
+async function getFullMemory(userId) {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=weight.desc.nullslast,created_at.desc&limit=50`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    return data.filter(m => !m.type || m.type === "fact");
+  } catch (e) {
+    console.error("getFullMemory error:", e);
+    return [];
+  }
+}
+
+/* ===================== SAVE DIALOG ===================== */
+
+async function saveDialog(userId, userMsg, botReply) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+      method: "POST",
       headers: {
         apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
-  );
-
-  const data = await res.json();
-  return data || [];
-}
-
-/* ===================== SAVE MEMORY ===================== */
-
-async function saveMemory(userId, content, weight) {
-  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify([
-      {
-        user_id: String(userId),
-        role: "user",
-        type: "fact",
-        content,
-        weight
-      }
-    ])
-  });
-}
-
-/* ===================== MEMORY ANALYZER ===================== */
-
-async function analyzeMemory(text) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify([
         {
-          role: "system",
-          content: `
-Определи, нужно ли сохранить факт.
-
-Ответ строго JSON:
-
-{
-  "save": true/false,
-  "fact": "...",
-  "weight": 0-1
-}
-
-weight:
-1 = критично
-0.7 = важно
-0.4 = можно забыть
-`
-        },
-        { role: "user", content: text }
-      ]
-    })
-  });
-
-  const data = await res.json();
-
-  try {
-    return JSON.parse(data.choices?.[0]?.message?.content);
-  } catch {
-    return { save: false };
+          user_id: String(userId),
+          role: "interaction",
+          type: "dialog",
+          content: `Пользователь: ${userMsg}\nКузя: ${botReply}`
+        }
+      ])
+    });
+  } catch (e) {
+    console.error("saveDialog error:", e);
   }
 }
 
-/* ===================== AXIS ===================== */
+/* ===================== SAVE FACT ===================== */
 
-async function getAxis(userId) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&type=eq.axis&limit=1`,
-    {
+async function saveMemory(userId, fact) {
+  try {
+    // проверка на дубли
+    const existing = await getFullMemory(userId);
+    if (existing.some(m => m.content === fact)) return;
+
+    await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
+      method: "POST",
       headers: {
         apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
-  );
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify([
+        {
+          user_id: String(userId),
+          role: "system",
+          type: "fact",
+          content: fact,
+          weight: 0.9
+        }
+      ])
+    });
+  } catch (e) {
+    console.error("saveMemory error:", e);
+  }
+}
 
-  const data = await res.json();
+/* ===================== EXTRACT FACTS ===================== */
 
-  if (!data.length) return null;
-
+async function extractFacts(text) {
   try {
-    return JSON.parse(data[0].content);
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: `Верни JSON:
+{ "facts": ["..."] }
+Если нет фактов → []`
+          },
+          { role: "user", content: text }
+        ]
+      })
+    });
+
+    const raw = (await res.json()).choices?.[0]?.message?.content || "";
+
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.facts || [];
+
   } catch {
-    return null;
+    return [];
   }
 }
 
-async function upsertAxis(userId, axis) {
-  await fetch(`${SUPABASE_URL}/rest/v1/memory`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify([
-      {
-        user_id: String(userId),
-        type: "axis",
-        content: JSON.stringify(axis)
-      }
-    ])
-  });
-}
+/* ===================== GENERATE ===================== */
 
-/* ===================== AXIS BUILDER ===================== */
-
-async function buildAxis(userId) {
-  if (!chatHistory[userId] || chatHistory[userId].length < 6) return;
-
-  const recent = chatHistory[userId].slice(-10);
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: `
-Определи ось диалога в JSON:
-
-{ "topic": "...", "goal": "...", "mode": "..." }
-`
-        },
-        ...recent
-      ]
-    })
-  });
-
-  const data = await res.json();
-
+async function generateResponse(userId, userText, memory) {
   try {
-    const axis = JSON.parse(data.choices[0].message.content);
-    await upsertAxis(userId, axis);
-  } catch {}
-}
+    const memoryContext = memory
+      .slice(0, 10)
+      .map(m => m.content)
+      .join("\n");
 
-/* ===================== RESPONSE ===================== */
+    // ищем имя
+    const nameRecord = memory.find(m => m.content.toLowerCase().includes("имя"));
+    const userName = nameRecord ? nameRecord.content.split(":")[1]?.trim() : null;
 
-async function generateResponse(userId, text, memory, axis) {
-  if (!chatHistory[userId]) chatHistory[userId] = [];
+    const systemPrompt = `Ты — Кузя.
 
-  chatHistory[userId].push({ role: "user", content: text });
+ПАМЯТЬ:
+${memoryContext || "нет"}
 
-  const strongMemory = memory
-    .filter(m => m.weight >= 0.7)
-    .map(m => m.content)
-    .join("\n");
+ПРАВИЛА:
+- если знаешь имя → используй его
+- не игнорируй факты
+- отвечай прямо`;
 
-  /* ---------- DRAFT ---------- */
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0.8,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userText }
+        ]
+      })
+    });
 
-  const draft = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `
-Ты — Кузя.
+    let reply = (await res.json()).choices?.[0]?.message?.content || "Ошибка";
 
-Используй только сильную память.
+    // усиливаем имя
+    if (userName && !reply.includes(userName)) {
+      reply = `${userName}, ${reply}`;
+    }
 
-Память:
-${strongMemory || "нет"}
+    return reply;
 
-Ось:
-${axis ? JSON.stringify(axis) : "нет"}
-
-Если ответ противоречит памяти — перепиши.
-
-Отвечай прямо.
-`
-        },
-        ...chatHistory[userId]
-      ]
-    })
-  });
-
-  const draftData = await draft.json();
-  let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
-
-  /* ---------- REVIEW ---------- */
-
-  const review = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "system",
-          content: `
-Проверь:
-
-— нет ли конфликта с памятью
-— ответ точный
-
-Если нет — исправь.
-`
-        },
-        { role: "user", content: text },
-        { role: "assistant", content: draftReply }
-      ]
-    })
-  });
-
-  const reviewData = await review.json();
-  let finalReply = reviewData.choices?.[0]?.message?.content || draftReply;
-
-  chatHistory[userId].push({ role: "assistant", content: finalReply });
-
-  /* ---------- MEMORY SAVE ---------- */
-
-  const analysis = await analyzeMemory(text);
-
-  if (analysis.save) {
-    await saveMemory(userId, analysis.fact, analysis.weight);
+  } catch {
+    return "Ошибка";
   }
-
-  await buildAxis(userId);
-
-  return finalReply;
-}
-
-/* ===================== ORCHESTRATOR ===================== */
-
-async function orchestrator({ userId, text }) {
-  const memory = await getMemory(userId);
-  const axis = await getAxis(userId);
-
-  return await generateResponse(userId, text, memory, axis);
 }
 
 /* ===================== WEBHOOK ===================== */
@@ -303,16 +202,26 @@ app.post("/webhook", async (req, res) => {
     const userId = msg.from.id;
     const text = msg.text || "";
 
-    const reply = await orchestrator({ userId, text });
+    const memory = await getFullMemory(userId);
+    const reply = await generateResponse(userId, text, memory);
 
     await sendMessage(chatId, reply);
+
+    await saveDialog(userId, text, reply);
+
+    const facts = await extractFacts(text);
+    for (const fact of facts) {
+      await saveMemory(userId, fact);
+    }
 
     res.sendStatus(200);
 
   } catch (e) {
-    console.error(e);
+    console.error("Webhook error:", e);
     res.sendStatus(200);
   }
 });
 
-app.listen(10000);
+app.listen(10000, () => {
+  console.log("Кузя работает");
+});
