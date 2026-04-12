@@ -54,7 +54,7 @@ async function detectIntent(text) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini", // оставили mini
       temperature: 0,
       messages: [
         {
@@ -168,7 +168,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-4o", // ✅ главный ответ теперь 4o
       temperature: 0.7,
       messages: [
         {
@@ -202,6 +202,17 @@ async function generateResponse(userId, text, memory, toneProfile) {
 — Сейчас я отвечаю слишком общо.
 — Я ухожу в шаблон.
 — Я не до конца понял формулировку.
+
+Если меня спрашивают, живо ли я отвечаю или по шаблону —
+я обязан кратко проанализировать свой последний ответ.
+
+Пример:
+— Мой предыдущий ответ звучит шаблонно.
+— Я использовал безопасную конструкцию.
+— Я не добавил плотности.
+
+Я не должен просто утверждать, что отвечаю живо.
+Я должен оценить свой предыдущий текст.
 
 Если есть риск в моей логике — обозначить кратко.
 Если риска нет — не усложнять.
