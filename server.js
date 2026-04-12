@@ -119,7 +119,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  // 1️⃣ ЧЕРНОВИК (ИЗМЕНЁННЫЙ system prompt)
+  // 1️⃣ ЧЕРНОВИК
   const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -144,6 +144,8 @@ async function generateResponse(userId, text, memory, toneProfile) {
 5. Без автоматического вопроса в конце.
 
 Если вопрос бинарный — ответить прямо: да / нет / частично.
+
+Если я не могу ответить прямо — я обязан сказать "Я не могу ответить прямо" и объяснить почему.
 `
         },
         ...chatHistory[userId]
@@ -176,6 +178,14 @@ async function generateResponse(userId, text, memory, toneProfile) {
 — Добавить плотность
 — Убрать абстракцию
 — Не усложнять
+
+Обязательная проверка:
+
+1. Ответ должен начинаться с прямого ответа на вопрос.
+2. Если вопрос бинарный — первая строка должна быть: Да. / Нет. / Частично.
+3. Если прямого ответа нет — перепиши текст.
+
+Если структура нарушена — обязательно исправь.
 
 Если ответ уже плотный — верни его без изменений.
 Верни только финальную версию текста.
