@@ -110,6 +110,58 @@ async function upsertAxis(userId, axisObject) {
   }
 }
 
+/* ===================== AXIS BUILDER ===================== */
+
+async function buildAxis(userId) {
+  if (!chatHistory[userId] || chatHistory[userId].length < 4) return;
+
+  const recent = chatHistory[userId].slice(-8);
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `
+Определи ось диалога.
+
+Ось — это краткое описание направления мышления пользователя.
+
+Формат:
+{
+  "topic": "...",
+  "goal": "...",
+  "mode": "..."
+}
+
+Правила:
+- Коротко
+- Без лишнего
+- Без объяснений
+- Только JSON
+`
+        },
+        ...recent
+      ]
+    })
+  });
+
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+
+  try {
+    const axis = JSON.parse(text);
+    await upsertAxis(userId, axis);
+  } catch {}
+}
+
 /* ===================== INTENT ===================== */
 
 async function detectIntent(text) {
@@ -185,7 +237,8 @@ async function generateResponse(userId, text, memory, axis, toneProfile) {
 
   const factsText = memory.map(x => x.content).join("\n");
 
-  // 1️⃣ ЧЕРНОВИК
+  /* ---------- 1. ЧЕРНОВИК ---------- */
+
   const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -201,27 +254,33 @@ async function generateResponse(userId, text, memory, axis, toneProfile) {
           content: `
 Ты — Кузя.
 
+Ты получаешь историю диалога выше.
+Сообщения с ролью "user" — реальные сообщения пользователя.
+Ты обязан учитывать их.
+
 Текущая ось:
 ${axis ? JSON.stringify(axis) : "Ось не задана."}
 
 Перед ответом:
 1. Определи последнее сообщение пользователя.
-2. Кратко сформулируй его смысл (внутренне).
+2. Кратко сформулируй его смысл.
 3. Только после этого отвечай.
+
+Я не имею права подменять формулировку вопроса.
 
 Структура ответа обязательна:
 
-1. Первая строка — прямой короткий ответ на вопрос.
-2. Затем — краткое пояснение (если нужно).
-3. Без консультантского тона.
+1. Первая строка — прямой ответ.
+2. Затем краткое пояснение.
+3. Без лишнего.
 4. Без расширения темы.
-5. Без автоматического вопроса в конце.
+5. Без вопроса в конце.
 
-Если вопрос бинарный — ответить прямо: да / нет / частично.
+Если бинарный вопрос:
+Да. / Нет. / Частично.
 
-Если я не могу ответить прямо — я обязан сказать "Я не могу ответить прямо" и объяснить почему.
-
-Я не имею права подменять формулировку вопроса на более удобную.
+Если не могу ответить:
+"Я не могу ответить прямо" + причина.
 `
         },
         ...chatHistory[userId]
@@ -232,7 +291,8 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
   const draftData = await draftResponse.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  // 2️⃣ РЕВЬЮ
+  /* ---------- 2. РЕВЬЮ ---------- */
+
   const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -246,33 +306,23 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
         {
           role: "system",
           content: `
-Ты проверяешь ответ Кузи перед отправкой.
+Проверь ответ.
 
-Задача:
-— Убрать шаблонность
-— Убрать консультантский тон
-— Добавить плотность
-— Убрать абстракцию
-— Не усложнять
+- Убери шаблон
+- Убери воду
+- Сделай плотным
 
-Обязательная проверка:
+Проверь:
+- Есть ли прямой ответ
+- Совпадает ли с вопросом
+- Использован ли смысл
 
-1. Ответ должен начинаться с прямого ответа на вопрос.
-2. Если вопрос бинарный — первая строка должна быть: Да. / Нет. / Частично.
-3. Если прямого ответа нет — перепиши текст.
-4. Проверь, отвечает ли текст именно на формулировку вопроса.
-   Не переформулируй вопрос в более удобный.
-   Если смысл искажен — исправь.
-5. Проверь, использован ли смысл последнего сообщения пользователя.
-   Если нет — перепиши.
+Если нет — исправь.
 
-Если структура нарушена — обязательно исправь.
-
-Если ответ уже плотный — верни его без изменений.
-Верни только финальную версию текста.
+Верни только финальный текст.
 `
         },
-        { role: "user", content: `Вопрос пользователя: ${text}` },
+        { role: "user", content: `Вопрос: ${text}` },
         { role: "assistant", content: draftReply }
       ]
     })
@@ -282,6 +332,8 @@ ${axis ? JSON.stringify(axis) : "Ось не задана."}
   let finalReply = reviewData.choices?.[0]?.message?.content || draftReply;
 
   chatHistory[userId].push({ role: "assistant", content: finalReply });
+
+  await buildAxis(userId);
 
   return finalReply;
 }
@@ -305,9 +357,7 @@ app.post("/webhook", async (req, res) => {
     const update = req.body;
     if (!update.message) return res.sendStatus(200);
 
-    if (update.update_id === lastUpdateId) {
-      return res.sendStatus(200);
-    }
+    if (update.update_id === lastUpdateId) return res.sendStatus(200);
     lastUpdateId = update.update_id;
 
     const message = update.message;
@@ -333,5 +383,5 @@ app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Core with axis running");
+  console.log("Core FINAL running");
 });
