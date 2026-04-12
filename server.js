@@ -22,7 +22,7 @@ async function sendMessage(chatId, text) {
 async function getFullMemory(userId) {
   try {
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=weight.desc.nullslast,created_at.desc&limit=50`,
+      `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -32,10 +32,9 @@ async function getFullMemory(userId) {
     );
 
     const data = await res.json();
-    
     if (!Array.isArray(data)) return [];
-    
     return data;
+
   } catch (e) {
     console.error("getFullMemory error:", e);
     return [];
@@ -60,8 +59,6 @@ async function saveDialog(userId, userMsg, botReply) {
         }
       ])
     });
-
-    console.log(`[MEMORY] Диалог сохранён для ${userId}`);
   } catch (e) {
     console.error("saveDialog error:", e);
   }
@@ -86,8 +83,6 @@ async function saveMemory(userId, fact) {
         }
       ])
     });
-
-    console.log(`[MEMORY] Факт сохранён: ${fact.substring(0, 50)}...`);
   } catch (e) {
     console.error("saveMemory error:", e);
   }
@@ -108,10 +103,7 @@ async function extractFacts(text) {
         messages: [
           {
             role: "system",
-            content: `Извлеки ТОЛЬКО важные факты о личности пользователя.
-JSON ответ: { "facts": ["...", "..."] }
-Если фактов нет - пусто будет.
-Примеры: имя, город, работа, интересы, цели`
+            content: `Извлеки факты о пользователе. JSON: { "facts": ["..."] }`
           },
           { role: "user", content: text }
         ]
@@ -119,7 +111,6 @@ JSON ответ: { "facts": ["...", "..."] }
     });
 
     const data = await res.json();
-    
     try {
       const parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
       return parsed.facts || [];
@@ -135,21 +126,16 @@ JSON ответ: { "facts": ["...", "..."] }
 async function generateResponse(userId, userText, memory) {
   try {
     const memoryContext = memory
-      .slice(0, 10)
+      .slice(0, 15)
       .map(m => m.content)
       .join("\n");
 
     const systemPrompt = `Ты — Кузя.
 
-ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:
-${memoryContext || "Нет информации о пользователе"}
+ПАМЯТЬ:
+${memoryContext || "нет"}
 
-ИНСТРУКЦИИ:
-- Используй память для контекста
-- Если знаешь имя пользователя - используй его
-- Если знаешь города/интересы - помни это
-- Будь дружелюбна и помогающая
-- Отвечай прямо и честно`;
+Используй память для контекста. Отвечай прямо.`;
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -174,7 +160,7 @@ ${memoryContext || "Нет информации о пользователе"}
     return reply;
   } catch (e) {
     console.error("generateResponse error:", e);
-    return "Извини, произошла ошибка";
+    return "Ошибка";
   }
 }
 
@@ -187,17 +173,10 @@ app.post("/webhook", async (req, res) => {
     const userId = msg.from.id;
     const text = msg.text || "";
 
-    console.log(`[${userId}] Сообщение: ${text.substring(0, 50)}`);
-
     const memory = await getFullMemory(userId);
-    console.log(`[${userId}] Загружено записей памяти: ${memory.length}`);
-
     const reply = await generateResponse(userId, text, memory);
-    console.log(`[${userId}] Ответ: ${reply.substring(0, 50)}...`);
 
     await sendMessage(chatId, reply);
-    console.log(`[${userId}] Отправлено в Telegram`);
-
     await saveDialog(userId, text, reply);
 
     const facts = await extractFacts(text);
@@ -214,5 +193,5 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.listen(10000, () => {
-  console.log("Кузя слушает на порту 10000");
+  console.log("Кузя работает");
 });
