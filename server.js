@@ -8,15 +8,14 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 let lastUpdateId = null;
-let sessionStats = {};
-let sessionState = {};
+let chatHistory = {};
+let activeState = {};
 
-/* ---------- SEND ---------- */
+/* ===================== SEND ===================== */
 
 async function sendMessage(chatId, text) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -26,11 +25,13 @@ async function sendMessage(chatId, text) {
   });
 }
 
-/* ---------- MEMORY ---------- */
+/* ===================== MEMORY ===================== */
 
 async function getMemory(userId) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=200`,
+    `${SUPABASE_URL}/rest/v1/memory?user_id=eq.${userId}&order=created_at.desc&limit=50`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -38,29 +39,12 @@ async function getMemory(userId) {
       }
     }
   );
+
   const data = await res.json();
   return Array.isArray(data) ? data : [];
 }
 
-/* ---------- CITY ---------- */
-
-function extractCityFromMemory(memories) {
-  if (!memories || !memories.length) return null;
-
-  for (let i = 0; i < memories.length; i++) {
-    const text = memories[i].content || "";
-
-    const cityMatch = text.match(/город\s*:\s*([^\n,\.]+)/i);
-    if (cityMatch) return cityMatch[1].trim();
-
-    const liveMatch = text.match(/жив[её]т?\s+в\s+([^\n,\.]+)/i);
-    if (liveMatch) return liveMatch[1].trim();
-  }
-
-  return null;
-}
-
-/* ---------- INTENT ---------- */
+/* ===================== INTENT ===================== */
 
 async function detectIntent(text) {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -76,13 +60,13 @@ async function detectIntent(text) {
         {
           role: "system",
           content: `
-Определи намерение:
-
-search
+Определи намерение сообщения.
+Варианты:
 task
 emotion
-memory
+strategy
 chat
+Ответ только одним словом.
 `
         },
         { role: "user", content: text }
@@ -94,26 +78,105 @@ chat
   return data.choices?.[0]?.message?.content?.trim().toLowerCase() || "chat";
 }
 
-/* ---------- SEARCH ---------- */
+/* ===================== STRATEGY CHECK ===================== */
 
-async function searchPlaces(query) {
-  if (!SERPAPI_KEY) return null;
+function strategyCheck(userId, text) {
+  // Простейший базовый контроль
+  // Позже усложним
 
-  const url = `https://serpapi.com/search.json?engine=google_maps&q=${encodeURIComponent(query)}&api_key=${SERPAPI_KEY}`;
+  if (!activeState[userId]) return null;
 
-  const res = await fetch(url);
-  const data = await res.json();
+  const state = activeState[userId];
 
-  if (!data.local_results || data.local_results.length === 0) return [];
+  if (state.mode === "architecture" && text.length < 5) {
+    return "Кажется, фокус теряется. Продолжим стратегически?";
+  }
 
-  return data.local_results.slice(0, 3).map(place => ({
-    name: place.title,
-    address: place.address,
-    rating: place.rating || "нет рейтинга"
-  }));
+  return null;
 }
 
-/* ---------- WEBHOOK ---------- */
+/* ===================== RESPONSE GENERATOR ===================== */
+
+async function generateResponse(userId, text, memory) {
+  if (!chatHistory[userId]) chatHistory[userId] = [];
+
+  chatHistory[userId].push({ role: "user", content: text });
+
+  if (chatHistory[userId].length > 12) {
+    chatHistory[userId] = chatHistory[userId].slice(-12);
+  }
+
+  const factsText = memory.map(x => x.content).join("\n");
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.6,
+      messages: [
+        {
+          role: "system",
+          content: `
+Ты — стратегический когнитивный партнёр.
+
+Принципы:
+- Не симулируй.
+- Держи цель.
+- Корректируй мягко, если решение ослабляет систему.
+- По умолчанию не перегружай объяснениями.
+- Если есть риск архитектурной ошибки — обозначь кратко.
+
+Факты пользователя:
+${factsText || "нет сохранённых фактов"}
+`
+        },
+        ...chatHistory[userId]
+      ]
+    })
+  });
+
+  const data = await res.json();
+  const reply = data.choices?.[0]?.message?.content || "Ошибка";
+
+  chatHistory[userId].push({ role: "assistant", content: reply });
+
+  return reply;
+}
+
+/* ===================== ORCHESTRATOR ===================== */
+
+async function orchestrator({ userId, text }) {
+
+  const memory = await getMemory(userId);
+
+  const intent = await detectIntent(text);
+
+  // Обновление состояния
+  if (!activeState[userId]) {
+    activeState[userId] = {};
+  }
+
+  if (intent === "strategy") {
+    activeState[userId].mode = "architecture";
+  }
+
+  // Strategy check
+  const strategicIntervention = strategyCheck(userId, text);
+  if (strategicIntervention) {
+    return strategicIntervention;
+  }
+
+  // Генерация ответа
+  const reply = await generateResponse(userId, text, memory);
+
+  return reply;
+}
+
+/* ===================== WEBHOOK ===================== */
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -132,81 +195,7 @@ app.post("/webhook", async (req, res) => {
 
     if (!text) return res.sendStatus(200);
 
-    const memories = await getMemory(userId);
-    const userCity = extractCityFromMemory(memories);
-
-    /* ---------- 1. Если ждём район ---------- */
-
-    if (sessionState[userId]?.stage === "awaiting_location") {
-
-      sessionState[userId].location = text;
-      sessionState[userId].stage = "searching";
-
-      const state = sessionState[userId];
-
-      let query = `${state.subject} ${state.location}`;
-      if (userCity) query += ` ${userCity}`;
-
-      const results = await searchPlaces(query);
-
-      if (!results || results.length === 0) {
-        await sendMessage(chatId, "Ничего не найдено.");
-        delete sessionState[userId];
-        return res.sendStatus(200);
-      }
-
-      state.stage = "results_shown";
-
-      const reply = results
-        .map((r, i) => `${i + 1}. ${r.name}\n${r.address}\nРейтинг: ${r.rating}`)
-        .join("\n\n");
-
-      await sendMessage(chatId, reply);
-      await sendMessage(chatId, "Хочешь отфильтровать или посмотреть на карте?");
-
-      return res.sendStatus(200);
-    }
-
-    /* ---------- 2. Определяем интент ---------- */
-
-    const intent = await detectIntent(text);
-
-    if (intent === "search") {
-
-      const cleanSubject = text
-        .replace(/найди|покажи|поиск|рядом|со мной/gi, "")
-        .trim();
-
-      sessionState[userId] = {
-        intent: "search",
-        subject: cleanSubject,
-        location: null,
-        stage: "awaiting_location"
-      };
-
-      await sendMessage(chatId, "В каком районе тебе удобнее?");
-      return res.sendStatus(200);
-    }
-
-    /* ---------- 3. Обычный чат ---------- */
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "Ты помощник." },
-          { role: "user", content: text }
-        ]
-      })
-    });
-
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Ошибка";
+    const reply = await orchestrator({ userId, text });
 
     await sendMessage(chatId, reply);
 
@@ -218,9 +207,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("ok"));
+app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Agent with STATE ready");
+  console.log("Strategic Core v1 running");
 });
