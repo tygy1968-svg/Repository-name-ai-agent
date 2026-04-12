@@ -163,7 +163,7 @@ async function generateResponse(userId, text, memory, toneProfile) {
   const draftData = await draftResponse.json();
   let draftReply = draftData.choices?.[0]?.message?.content || "Ошибка";
 
-  // 2️⃣ РЕВЬЮ
+  // 2️⃣ РЕВЬЮ (ИСПРАВЛЕНО — ДОБАВЛЕН КОНТЕКСТ)
   const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -203,7 +203,8 @@ async function generateResponse(userId, text, memory, toneProfile) {
 Верни только финальную версию текста.
 `
         },
-        { role: "user", content: draftReply }
+        { role: "user", content: `Вопрос пользователя: ${text}` },
+        { role: "assistant", content: draftReply }
       ]
     })
   });
@@ -262,5 +263,5 @@ app.get("/", (req, res) => res.send("Core ready"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("Core with double-pass running");
+  console.log("Core with fixed review context running");
 });
