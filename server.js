@@ -50,26 +50,45 @@ async function sbGetMemory(userId, limit = 15) {
 }
 
 async function sbSaveFact(userId, fact) {
-  const embedding = await createEmbedding(fact);
+  try {
+    console.log("Saving fact:", fact);
 
-  await fetch(`${SUPABASE_MEMORY_URL}`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify([
-      {
-        user_id: String(userId),
-        role: "system",
-        type: "fact",
-        content: fact,
-        weight: 1.0,
-        embedding: embedding
+    const embedding = await createEmbedding(fact);
+
+    const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation,resolution=ignore-duplicates"
+      },
+      body: JSON.stringify([
+        {
+          user_id: String(userId),
+          role: "system",
+          type: "fact",
+          content: fact,
+          weight: 1.0,
+          embedding: embedding
+        }
+      ])
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error("Supabase save error:", res.status, errorText);
+    } else {
+      const data = await res.json();
+      if (data.length > 0) {
+        console.log("Memory saved:", data[0].content);
+      } else {
+        console.log("Memory already exists (duplicate skipped):", fact);
       }
-    ])
-  });
+    }
+  } catch (error) {
+    console.error("sbSaveFact exception:", error);
+  }
 }
 
 async function sbSearchMemory(userId, queryText, k = 5) {
@@ -330,7 +349,13 @@ app.post("/webhook", async (req, res) => {
       await tgSendMessage(chatId, reply);
 
       const facts = await extractFacts(userText);
-      await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      console.log("Extracted facts:", facts);
+
+      if (facts.length === 0) {
+        console.log("No facts extracted from message:", userText);
+      } else {
+        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      }
 
     } catch (e) {
       console.error("handler error", e);
