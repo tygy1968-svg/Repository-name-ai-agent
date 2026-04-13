@@ -175,23 +175,20 @@ async function extractFacts(userText) {
       {
         role: "system",
         content: `
-Извлеки только важные и долговременные факты о пользователе.
+Извлеки только важные и долговременные факты о пользователе и верни их в нормализованной форме.
 
-Сохраняй ТОЛЬКО если информация явно указана:
-- имя
-- город или страна
-- название бренда или бизнеса
-- род деятельности
-- устойчивые предпочтения (например, "обращаться на ты")
+Правила:
+- Имя → "Имя пользователя Юля"
+- Город → "Пользователь живет в Киеве"
+- Бренд → "Пользователь развивает бренд AMADORA"
+- Предпочтение → "Пользователь предпочитает обращаться на ты"
 
-НЕ создавай факты со значениями "не указано", "неизвестно", "нет данных" и т.п.
-Если конкретных фактов нет — верни пустой список.
+Сохраняй только если информация явно указана.
+Не используй "не указано", "неизвестно" и т.п.
+Если фактов нет — верни {"facts":[]}.
 
 Верни строго JSON:
-{"facts":["факт 1","факт 2"]}
-
-Если фактов нет:
-{"facts":[]}
+{"facts":["..."]}
 `
       },
       { role: "user", content: userText }
@@ -200,20 +197,14 @@ async function extractFacts(userText) {
   );
 
   try {
-    // Извлекаем JSON даже если вокруг есть лишний текст
-    const match = content.match(/\{[\s\S]*\}/);
-    if (!match) return [];
+    // Надёжное извлечение JSON
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+    if (start === -1 || end === -1) return [];
 
-    const parsed = JSON.parse(match[0]);
-    const facts = parsed.facts || [];
-
-    // Дополнительная защита от мусора
-    return facts.filter(
-      f =>
-        f &&
-        typeof f === "string" &&
-        !/не указано|неизвестно|нет данных/i.test(f)
-    );
+    const jsonString = content.slice(start, end + 1);
+    const parsed = JSON.parse(jsonString);
+    return Array.isArray(parsed.facts) ? parsed.facts : [];
   } catch (e) {
     console.error("Fact parse error:", content);
     return [];
