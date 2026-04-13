@@ -77,7 +77,7 @@ async function vectorSearch(userId, text, limit = 3) {
 async function sbSaveFact(userId, fact) {
   const embedding = await createEmbedding(fact);
 
-  const response = await fetch(`${SUPABASE_MEMORY_URL}`, {
+  await fetch(`${SUPABASE_MEMORY_URL}`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -95,13 +95,6 @@ async function sbSaveFact(userId, fact) {
       }
     ])
   });
-
-  if (!response.ok) {
-    const err = await response.text();
-    console.error("Supabase save error:", err);
-  } else {
-    console.log("Saved to Supabase:", fact);
-  }
 }
 
 // ---------- OPENAI ----------
@@ -165,71 +158,11 @@ async function extractFacts(userText) {
     { temperature: 0, max_tokens: 100 }
   );
 
-  console.log("extractFacts raw:", content);
-
   try {
     const parsed = JSON.parse(content);
-    console.log("extractFacts parsed:", parsed);
     return parsed.facts || [];
-  } catch (e) {
-    console.error("extractFacts parse error:", e);
+  } catch {
     return [];
-  }
-}
-
-async function shouldKeepFact(text) {
-  if (!text || text.length > 120) return false;
-  if (/https?:\/\/|www\./i.test(text)) return false; // исключаем ссылки
-
-  const verdict = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `Ты — фильтр долговременной памяти ИИ.
-
-Сохраняй (true), если это:
-- имя, город, роль, предпочтения, цели, проекты, бренд, бизнес-контекст;
-- информация, актуальная длительное время;
-- данные, улучшающие будущие ответы.
-
-Не сохраняй (false), если это:
-- приветствия, эмоции, шутки, разовые действия;
-- временные детали и ситуативные фразы;
-- общие рассуждения без фактов.
-
-Верни строго JSON:
-{"keep": true}
-или
-{"keep": false}`
-      },
-      { role: "user", content: text }
-    ],
-    { temperature: 0, max_tokens: 20 }
-  );
-
-  console.log("shouldKeepFact raw:", verdict);
-
-  try {
-    const parsed = JSON.parse(verdict);
-    console.log("shouldKeepFact parsed:", parsed);
-    return parsed.keep === true;
-  } catch (e) {
-    console.error("shouldKeepFact parse error:", e);
-    return false;
-  }
-}
-
-async function saveFactIfValuable(userId, fact) {
-  try {
-    if (!fact || fact.length < 5 || fact.length > 120) return;
-    if (/^\W*$/.test(fact)) return; // только символы/эмодзи
-
-    const keep = await shouldKeepFact(fact);
-    if (!keep) return;
-
-    await sbSaveFact(userId, fact);
-  } catch (e) {
-    console.error("memory filter error", e);
   }
 }
 
@@ -398,7 +331,7 @@ app.post("/webhook", async (req, res) => {
       await tgSendMessage(chatId, reply);
 
       const facts = await extractFacts(userText);
-      await Promise.all(facts.map(f => saveFactIfValuable(userId, f)));
+      await Promise.all(facts.map(f => sbSaveFact(userId, f)));
 
     } catch (e) {
       console.error("handler error", e);
