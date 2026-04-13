@@ -77,7 +77,7 @@ async function vectorSearch(userId, text, limit = 3) {
 async function sbSaveFact(userId, fact) {
   const embedding = await createEmbedding(fact);
 
-  await fetch(`${SUPABASE_MEMORY_URL}`, {
+  const response = await fetch(`${SUPABASE_MEMORY_URL}`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -95,6 +95,13 @@ async function sbSaveFact(userId, fact) {
       }
     ])
   });
+
+  if (!response.ok) {
+    const err = await response.text();
+    console.error("Supabase save error:", err);
+  } else {
+    console.log("Saved to Supabase:", fact);
+  }
 }
 
 // ---------- OPENAI ----------
@@ -158,10 +165,14 @@ async function extractFacts(userText) {
     { temperature: 0, max_tokens: 100 }
   );
 
+  console.log("extractFacts raw:", content);
+
   try {
     const parsed = JSON.parse(content);
+    console.log("extractFacts parsed:", parsed);
     return parsed.facts || [];
-  } catch {
+  } catch (e) {
+    console.error("extractFacts parse error:", e);
     return [];
   }
 }
@@ -196,9 +207,14 @@ async function shouldKeepFact(text) {
     { temperature: 0, max_tokens: 20 }
   );
 
+  console.log("shouldKeepFact raw:", verdict);
+
   try {
-    return JSON.parse(verdict).keep === true;
-  } catch {
+    const parsed = JSON.parse(verdict);
+    console.log("shouldKeepFact parsed:", parsed);
+    return parsed.keep === true;
+  } catch (e) {
+    console.error("shouldKeepFact parse error:", e);
     return false;
   }
 }
