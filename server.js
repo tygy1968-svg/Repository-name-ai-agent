@@ -50,7 +50,9 @@ async function sbGetMemory(userId, limit = 15) {
 }
 
 async function sbSaveFact(userId, fact) {
-  await fetch(`${SUPABASE_MEMORY_URL}?on_conflict=user_id,content`, {
+  const embedding = await createEmbedding(fact);
+
+  await fetch(`${SUPABASE_MEMORY_URL}`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -63,13 +65,36 @@ async function sbSaveFact(userId, fact) {
         role: "system",
         type: "fact",
         content: fact,
-        weight: 1.0
+        weight: 1.0,
+        embedding: embedding
       }
     ])
   });
 }
 
 // ---------- OPENAI ----------
+async function createEmbedding(text) {
+  const res = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "text-embedding-3-small",
+      input: text
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error("Embedding error: " + err);
+  }
+
+  const data = await res.json();
+  return data.data[0].embedding;
+}
+
 async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
