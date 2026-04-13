@@ -117,31 +117,77 @@ async function extractFacts(userText) {
 }
 
 // ---------- GENERATE REPLY ----------
+async function planStep(userText, memoryContext) {
+  const plan = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `Ты планировщик.
+Определи:
+1. Тип запроса (analysis / direct / emotional / strategic)
+2. Нужно ли использовать память (true/false)
+3. Нужно ли занять позицию (true/false)
+
+Верни строго JSON:
+{
+  "type": "...",
+  "needs_memory": true,
+  "should_take_position": true
+}`
+      },
+      {
+        role: "user",
+        content: `ПАМЯТЬ:
+${memoryContext || "нет"}
+
+СООБЩЕНИЕ:
+${userText}`
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  try {
+    return JSON.parse(plan);
+  } catch {
+    return {
+      type: "direct",
+      needs_memory: false,
+      should_take_position: false
+    };
+  }
+}
+
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
   }
 
-  // добавляем сообщение пользователя
   dialogHistory[userId].push({ role: "user", content: userText });
 
-  // ограничиваем историю
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
   const memoryContext = memory.map(m => m.content).join("\n");
 
+  // 1️⃣ Планирование
+  const plan = await planStep(userText, memoryContext);
+
+  // 2️⃣ Формирование ответа
   const systemPrompt = `Ты — Кузя.
 
-ПАМЯТЬ:
-${memoryContext || "нет"}
+Тип запроса: ${plan.type}
+Использовать память: ${plan.needs_memory}
+Занять позицию: ${plan.should_take_position}
 
-Перед ответом:
-1. Кратко сформулируй смысл последнего сообщения (внутренне).
-2. Потом ответь по сути.
-3. Не уходи в абстракцию.
-4. Не расширяй тему без запроса.`;
+${plan.needs_memory ? `ПАМЯТЬ:\n${memoryContext}` : ""}
+
+Правила:
+- Если should_take_position = true → сформулируй вывод.
+- Не возвращай вопрос, если можно сделать вывод.
+- Отвечай по сути.
+- Без методичек.`;
 
   const messages = [
     { role: "system", content: systemPrompt },
@@ -153,7 +199,6 @@ ${memoryContext || "нет"}
     max_tokens: 300
   });
 
-  // сохраняем ответ в историю
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
   return reply;
