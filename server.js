@@ -72,6 +72,34 @@ async function sbSaveFact(userId, fact) {
   });
 }
 
+async function sbSearchMemory(userId, queryText, k = 5) {
+  const queryEmbedding = await createEmbedding(queryText);
+
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/rpc/match_memory`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        query_embedding: queryEmbedding,
+        match_count: k,
+        p_user_id: String(userId)
+      })
+    }
+  );
+
+  if (!res.ok) {
+    console.error("vector search error:", await res.text());
+    return [];
+  }
+
+  return res.json();
+}
+
 // ---------- OPENAI ----------
 async function createEmbedding(text) {
   const res = await fetch("https://api.openai.com/v1/embeddings", {
@@ -230,7 +258,19 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  const memoryContext = (memory || []).map(m => m.content).join("\n");
+  let memoryContext = "";
+
+  const recentMemoryPreview = (memory || [])
+    .slice(0, 5)
+    .map(m => m.content)
+    .join("\n");
+
+  const plan = await planStep(userText, recentMemoryPreview);
+
+  if (plan.needs_memory) {
+    const relevant = await sbSearchMemory(userId, userText, 5);
+    memoryContext = relevant.map(m => m.content).join("\n");
+  }
 
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
