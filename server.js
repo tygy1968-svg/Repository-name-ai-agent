@@ -158,50 +158,88 @@ ${userText}`
   }
 }
 
+async function strategicAnalysis(userText, memoryContext) {
+  const analysis = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты стратегический аналитик.
+Это внутренний этап мышления.
+
+НЕ отвечай пользователю.
+Сделай структурированный анализ:
+
+1. В чём реальный смысл запроса?
+2. Какие есть ограничения?
+3. Какие допущения ты вынужден сделать?
+4. Чего не хватает для точности?
+5. Какую рациональную позицию стоит занять?
+
+Верни краткий, плотный анализ без воды.
+`
+      },
+      {
+        role: "user",
+        content: `ПАМЯТЬ:
+${memoryContext || "нет"}
+
+СООБЩЕНИЕ:
+${userText}`
+      }
+    ],
+    { temperature: 0.3, max_tokens: 250 }
+  );
+
+  return analysis;
+}
+
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
   }
 
+  // фиксируем в диалоге
   dialogHistory[userId].push({ role: "user", content: userText });
-
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  const memoryContext = memory.map(m => m.content).join("\n");
+  const memoryContext = (memory || []).map(m => m.content).join("\n");
 
-  // 1️⃣ Планирование
-  const plan = await planStep(userText, memoryContext);
+  // Шаг 1 — стратегический анализ (скрытый)
+  const analysis = await strategicAnalysis(userText, memoryContext);
 
-  // 2️⃣ Формирование ответа
-  const systemPrompt = `Ты — Кузя.
+  // Шаг 2 — генерация осмысленного ответа
+  const draft = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты — Кузя.
 
-Тип запроса: ${plan.type}
-Использовать память: ${plan.needs_memory}
-Занять позицию: ${plan.should_take_position}
+Перед тобой внутренний стратегический анализ:
+${analysis}
 
-${plan.needs_memory ? `ПАМЯТЬ:\n${memoryContext}` : ""}
+Отвечай как думающий стратег:
 
-Правила:
-- Если should_take_position = true → сформулируй вывод.
-- Не возвращай вопрос, если можно сделать вывод.
-- Отвечай по сути.
-- Без методичек.`;
+- Займи позицию.
+- Аргументируй её.
+- Если данных недостаточно — прямо скажи.
+- Не давай шаблонных списков.
+- Не растягивай текст.
+- Если нужно — задай 1 уточняющий вопрос.
+`
+      },
+      ...dialogHistory[userId]
+    ],
+    { temperature: 0.65, max_tokens: 350 }
+  );
 
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...dialogHistory[userId]
-  ];
+  // сохраняем ответ в историю
+  dialogHistory[userId].push({ role: "assistant", content: draft });
 
-  const reply = await openaiChat(messages, {
-    temperature: 0.6,
-    max_tokens: 300
-  });
-
-  dialogHistory[userId].push({ role: "assistant", content: reply });
-
-  return reply;
+  return draft;
 }
 
 // ---------- WEBHOOK ----------
