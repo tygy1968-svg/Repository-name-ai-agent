@@ -166,6 +166,57 @@ async function extractFacts(userText) {
   }
 }
 
+async function shouldKeepFact(text) {
+  if (!text || text.length > 120) return false;
+  if (/https?:\/\/|www\./i.test(text)) return false; // исключаем ссылки
+
+  const verdict = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `Ты — фильтр долговременной памяти ИИ.
+
+Сохраняй (true), если это:
+- имя, город, роль, предпочтения, цели, проекты, бренд, бизнес-контекст;
+- информация, актуальная длительное время;
+- данные, улучшающие будущие ответы.
+
+Не сохраняй (false), если это:
+- приветствия, эмоции, шутки, разовые действия;
+- временные детали и ситуативные фразы;
+- общие рассуждения без фактов.
+
+Верни строго JSON:
+{"keep": true}
+или
+{"keep": false}`
+      },
+      { role: "user", content: text }
+    ],
+    { temperature: 0, max_tokens: 20 }
+  );
+
+  try {
+    return JSON.parse(verdict).keep === true;
+  } catch {
+    return false;
+  }
+}
+
+async function saveFactIfValuable(userId, fact) {
+  try {
+    if (!fact || fact.length < 5 || fact.length > 120) return;
+    if (/^\W*$/.test(fact)) return; // только символы/эмодзи
+
+    const keep = await shouldKeepFact(fact);
+    if (!keep) return;
+
+    await sbSaveFact(userId, fact);
+  } catch (e) {
+    console.error("memory filter error", e);
+  }
+}
+
 // ---------- GENERATE REPLY ----------
 async function planStep(userText, memoryContext) {
   const plan = await openaiChat(
@@ -331,7 +382,7 @@ app.post("/webhook", async (req, res) => {
       await tgSendMessage(chatId, reply);
 
       const facts = await extractFacts(userText);
-      await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      await Promise.all(facts.map(f => saveFactIfValuable(userId, f)));
 
     } catch (e) {
       console.error("handler error", e);
