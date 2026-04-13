@@ -49,31 +49,6 @@ async function sbGetMemory(userId, limit = 15) {
   return res.json();
 }
 
-async function vectorSearch(userId, text, limit = 3) {
-  const embedding = await createEmbedding(text);
-
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_memory`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      query_embedding: embedding,
-      match_user_id: String(userId),
-      match_count: limit
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error("Vector search error: " + err);
-  }
-
-  return res.json();
-}
-
 async function sbSaveFact(userId, fact) {
   const embedding = await createEmbedding(fact);
 
@@ -255,23 +230,7 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  let memoryContext = "";
-
-  // Линейная память (последние записи)
-  const recentMemory = (memory || []).map(m => m.content).join("\n");
-
-  try {
-    // Семантическая (векторная) память
-    const relevant = await vectorSearch(userId, userText, 3);
-    const vectorMemory = relevant.map(r => r.content).join("\n");
-
-    memoryContext = [vectorMemory, recentMemory]
-      .filter(Boolean)
-      .join("\n");
-  } catch (e) {
-    console.error("vector search failed", e);
-    memoryContext = recentMemory; // fallback на обычную память
-  }
+  const memoryContext = (memory || []).map(m => m.content).join("\n");
 
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
