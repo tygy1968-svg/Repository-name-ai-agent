@@ -94,22 +94,19 @@ async function sbSaveFact(userId, fact) {
 async function sbSearchMemory(userId, queryText, k = 5) {
   const queryEmbedding = await createEmbedding(queryText);
 
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/rpc/match_memory`,
-    {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        query_embedding: queryEmbedding,
-        match_count: k,
-        p_user_id: String(userId)
-      })
-    }
-  );
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_memory`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      query_embedding: queryEmbedding,
+      match_count: k,
+      p_user_id: String(userId)
+    })
+  });
 
   if (!res.ok) {
     console.error("vector search error:", await res.text());
@@ -277,42 +274,62 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
+  // --- NEW MEMORY LOGIC (as requested) ---
   let memoryContext = "";
 
+  // Краткий превью последних фактов для планировщика
   const recentMemoryPreview = (memory || [])
     .slice(0, 5)
     .map(m => m.content)
     .join("\n");
 
+  // Планирование (влияет на стиль ответа, но не блокирует память)
   const plan = await planStep(userText, recentMemoryPreview);
 
-  if (plan.needs_memory) {
-    const relevant = await sbSearchMemory(userId, userText, 5);
-    memoryContext = relevant.map(m => m.content).join("\n");
+  // Векторный поиск памяти выполняем ВСЕГДА
+  let relevant = [];
+  try {
+    relevant = await sbSearchMemory(userId, userText, 5);
+  } catch (e) {
+    console.error("Memory search failed:", e);
   }
+
+  // Если векторный поиск ничего не дал — используем последние факты
+  if (relevant && relevant.length > 0) {
+    memoryContext = relevant.map(m => m.content).join("\n");
+  } else {
+    memoryContext = recentMemoryPreview;
+  }
+
+  console.log("Memory context used:", memoryContext);
+  // --- END NEW MEMORY LOGIC ---
 
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
 
-  // Шаг 2 — генерация осмысленного ответа
+  // Шаг 2 — генерация осмысленного ответа (with memoryContext in system prompt)
   const draft = await openaiChat(
     [
       {
         role: "system",
         content: `
-Ты — Кузя.
+Ты — Кузя, умный персональный ассистент с долговременной памятью.
+
+ФАКТЫ О ПОЛЬЗОВАТЕЛЕ:
+${memoryContext || "Нет сохранённых фактов"}
 
 Перед тобой внутренний стратегический анализ:
 ${analysis}
 
-Отвечай как думающий стратег:
+Используй факты о пользователе, если они релевантны вопросу.
+Если факт прямо отвечает на вопрос — отвечай уверенно, без лишних уточнений.
 
+Стиль ответа:
 - Займи позицию.
-- Аргументируй её.
-- Если данных недостаточно — прямо скажи.
-- Не давай шаблонных списков.
-- Не растягивай текст.
-- Если нужно — задай 1 уточняющий вопрос.
+- Аргументируй кратко и по делу.
+- Если данных действительно нет — скажи об этом честно.
+- Без шаблонных фраз и лишней воды.
+- При необходимости задай 1 уточняющий вопрос.
 `
       },
       ...dialogHistory[userId]
