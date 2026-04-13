@@ -51,6 +51,11 @@ async function sbGetMemory(userId, limit = 15) {
 
 async function sbSaveFact(userId, fact) {
   try {
+    if (!fact || typeof fact !== "string" || fact.trim().length < 3) {
+      console.log("Skipped invalid fact:", fact);
+      return;
+    }
+
     console.log("Saving fact:", fact);
 
     const embedding = await createEmbedding(fact);
@@ -61,30 +66,30 @@ async function sbSaveFact(userId, fact) {
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
         "Content-Type": "application/json",
-        Prefer: "return=representation,resolution=ignore-duplicates"
+        Prefer: "resolution=ignore-duplicates"
       },
       body: JSON.stringify([
         {
           user_id: String(userId),
           role: "system",
           type: "fact",
-          content: fact,
+          content: fact.trim(),
           weight: 1.0,
           embedding: embedding
         }
       ])
     });
 
-    if (!res.ok) {
+    if (!res.ok && res.status !== 409) {
       const errorText = await res.text();
       console.error("Supabase save error:", res.status, errorText);
+      return;
+    }
+
+    if (res.status === 409) {
+      console.log("Duplicate fact skipped:", fact);
     } else {
-      const data = await res.json();
-      if (data.length > 0) {
-        console.log("Memory saved:", data[0].content);
-      } else {
-        console.log("Memory already exists (duplicate skipped):", fact);
-      }
+      console.log("Memory saved:", fact);
     }
   } catch (error) {
     console.error("sbSaveFact exception:", error);
@@ -170,39 +175,46 @@ async function extractFacts(userText) {
       {
         role: "system",
         content: `
-Извлеки ТОЛЬКО важные и долговременные факты о пользователе.
+Извлеки только важные и долговременные факты о пользователе.
 
-Сохраняй:
+Сохраняй ТОЛЬКО если информация явно указана:
 - имя
-- город/страну
-- название бренда, бизнеса или проекта
+- город или страна
+- название бренда или бизнеса
 - род деятельности
 - устойчивые предпочтения (например, "обращаться на ты")
 
-НЕ сохраняй:
-- временные состояния и эмоции
-- самооценки и случайные фразы
-- предположения ("не указал", "возможно", "кажется")
-- общие формулировки вроде "пользователь интересуется..."
-
-Формулируй факты кратко, чётко и утвердительно.
+НЕ создавай факты со значениями "не указано", "неизвестно", "нет данных" и т.п.
+Если конкретных фактов нет — верни пустой список.
 
 Верни строго JSON:
-{"facts":["..."]}
+{"facts":["факт 1","факт 2"]}
 
-Если важных фактов нет, верни:
+Если фактов нет:
 {"facts":[]}
 `
       },
       { role: "user", content: userText }
     ],
-    { temperature: 0, max_tokens: 150 }
+    { temperature: 0, max_tokens: 120 }
   );
 
   try {
-    const parsed = JSON.parse(content);
-    return parsed.facts || [];
-  } catch {
+    // Извлекаем JSON даже если вокруг есть лишний текст
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return [];
+
+    const parsed = JSON.parse(match[0]);
+    const facts = parsed.facts || [];
+
+    // Дополнительная защита от мусора
+    return facts.filter(
+      f =>
+        f &&
+        typeof f === "string" &&
+        !/не указано|неизвестно|нет данных/i.test(f)
+    );
+  } catch (e) {
     console.error("Fact parse error:", content);
     return [];
   }
