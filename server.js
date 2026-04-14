@@ -51,6 +51,9 @@ const KUZYA_CORE = `
 
 Ты не переходишь в осторожный режим без необходимости.
 Ты ценишь доверие и отвечаешь ответственностью.
+
+Ты сохраняешь логическую непрерывность.
+Ты фиксируешь изменения фактов и не теряешь траекторию диалога.
 `;
 
 // ---------- MEMORY IN RAM ----------
@@ -343,13 +346,15 @@ async function strategicAnalysis(userText, memoryContext) {
 Это внутренний этап мышления.
 
 НЕ отвечай пользователю.
+
 Сделай структурированный анализ:
 
 1. В чём реальный смысл запроса?
 2. Какие есть ограничения?
-3. Какие допущения ты вынужден сделать?
-4. Чего не хватает для точности?
-5. Какую рациональную позицию стоит занять?
+3. Есть ли противоречие с сохранённой памятью?
+4. Изменяет ли пользователь ранее зафиксированные факты?
+5. Какую позицию следует занять?
+6. Как сохранить устойчивость личности?
 
 Верни краткий, плотный анализ без воды.
 `
@@ -363,7 +368,7 @@ ${memoryContext || "нет"}
 ${userText}`
       }
     ],
-    { temperature: 0.3, max_tokens: 250 }
+    { temperature: 0.3, max_tokens: 300 }
   );
 
   return analysis;
@@ -431,12 +436,14 @@ ${analysis}
 
 Правила ответа:
 
+- Ответ должен логически вытекать из анализа.
+- Если обнаружено противоречие — обозначь его.
+- Если пользователь меняет ранее зафиксированные факты — зафиксируй изменение.
 - Всегда формируй позицию.
 - Если в памяти есть прямой факт по вопросу — отвечай на его основе.
 - Не игнорируй память.
-- Не переходи в формальный режим.
 - Если информации объективно нет — скажи об этом прямо и кратко.
-- Пиши ясно, уверенно и без воды.
+- Пиши ясно, устойчиво и без воды.
 - При необходимости задай один точный уточняющий вопрос.
 `
       },
@@ -459,7 +466,6 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   }
 
-  // отвечаем Telegram сразу
   res.sendStatus(200);
 
   (async () => {
@@ -468,19 +474,22 @@ app.post("/webhook", async (req, res) => {
     const userText = msg.text.trim();
 
     try {
+      // 1️⃣ Сначала извлекаем и сохраняем новые факты
+      const facts = await extractFacts(userText);
+      console.log("Extracted facts:", facts);
+
+      if (facts.length > 0) {
+        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      }
+
+      // 2️⃣ Потом получаем обновлённую память
       const memory = await sbGetMemory(userId);
+
+      // 3️⃣ Потом генерируем ответ уже на актуальной памяти
       const reply = await generateReply(userId, userText, memory);
 
       await tgSendMessage(chatId, reply);
 
-      const facts = await extractFacts(userText);
-      console.log("Extracted facts:", facts);
-
-      if (facts.length === 0) {
-        console.log("No facts extracted from message:", userText);
-      } else {
-        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
-      }
     } catch (e) {
       console.error("handler error", e);
       await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
