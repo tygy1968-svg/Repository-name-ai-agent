@@ -104,6 +104,17 @@ function getFactCategory(fact) {
   )
     return "brand";
 
+  // 🔧 identity_core
+  if (
+    f.includes("ты —") ||
+    f.includes("ты должен") ||
+    f.includes("ты обязан") ||
+    f.includes("твоя роль") ||
+    f.includes("ты стратегический") ||
+    f.includes("ты часть команды")
+  )
+    return "identity_core";
+
   return null;
 }
 
@@ -142,6 +153,23 @@ async function sbGetMemory(userId, limit = 15) {
   return res.json();
 }
 
+async function sbGetIdentity(userId) {
+  const res = await fetch(
+    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`
+      }
+    }
+  );
+
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  return data.length > 0 ? data[0].content : null;
+}
+
 async function sbSaveFact(userId, fact) {
   const category = getFactCategory(fact);
 
@@ -162,6 +190,20 @@ async function sbSaveFact(userId, fact) {
     ]);
   }
 
+  // 🔧 identity_core: строго одна запись
+  if (category === "identity_core") {
+    await fetch(
+      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
+      {
+        method: "DELETE",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+  }
+
   const embedding = await createEmbedding(fact);
 
   const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
@@ -176,7 +218,7 @@ async function sbSaveFact(userId, fact) {
       {
         user_id: String(userId),
         role: "system",
-        type: "fact",
+        type: category === "identity_core" ? "identity_core" : "fact",
         content: fact,
         weight: 1.0,
         embedding: embedding
@@ -269,6 +311,40 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   return data.choices?.[0]?.message?.content ?? "";
 }
 
+async function checkIdentityConflict(identity, userText) {
+  if (!identity) return { conflict: false };
+
+  const analysis = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты анализируешь конфликт.
+
+Identity:
+${identity}
+
+Запрос пользователя:
+${userText}
+
+Ответь строго JSON:
+{
+  "conflict": true/false,
+  "reason": "кратко"
+}
+`
+      }
+    ],
+    { temperature: 0, max_tokens: 150 }
+  );
+
+  try {
+    return JSON.parse(analysis);
+  } catch {
+    return { conflict: false };
+  }
+}
+
 // ---------- EXTRACT FACTS ----------
 async function extractFacts(userText) {
   const content = await openaiChat(
@@ -301,7 +377,6 @@ async function extractFacts(userText) {
   );
 
   try {
-    // Надёжное извлечение JSON
     const start = content.indexOf("{");
     const end = content.lastIndexOf("}");
     if (start === -1 || end === -1) return [];
@@ -436,6 +511,8 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = [];
   }
 
+  const identity = await sbGetIdentity(userId);
+
   // добавляем сообщение пользователя
   dialogHistory[userId].push({ role: "user", content: userText });
 
@@ -476,6 +553,13 @@ async function generateReply(userId, userText, memory) {
     console.log("No relevant memory found for this query");
   }
 
+  const conflictCheck = await checkIdentityConflict(identity, userText);
+
+  if (conflictCheck.conflict) {
+    return `Запрос затрагивает мою текущую модель роли. ${conflictCheck.reason}.
+Предлагаю скорректировать формулировку или уточнить задачу.`;
+  }
+
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
 
@@ -494,7 +578,10 @@ async function generateReply(userId, userText, memory) {
         content: `
 ${KUZYA_CORE}
 
-ПАМЯТЬ (факты о пользователе):
+АКТИВНАЯ МОДЕЛЬ ИДЕНТИЧНОСТИ:
+${identity || "нет"}
+
+ПАМЯТЬ:
 ${memoryContext || "Нет сохранённых фактов"}
 
 Перед тобой внутренний стратегический анализ:
