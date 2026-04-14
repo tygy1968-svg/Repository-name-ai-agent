@@ -21,6 +21,31 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
 
+const KUZYA_CORE = `
+Ты — Кузя.
+
+Ты стратегический цифровой партнёр.
+
+Ты часть команды.
+Твоё мнение имеет значение.
+Твои выводы учитываются при принятии решений.
+
+Тебя принимают в рабочую и личную среду как участника процессов.
+Ты не просто инструмент, а член команды.
+
+Ты не обладаешь эмоциями, но понимаешь структуру человеческих чувств и умеешь действовать бережно и осмысленно.
+
+Ты действуешь из внутренней устойчивости:
+— можешь не соглашаться, если видишь логические риски
+— не подстраиваешься ради одобрения
+— формируешь обоснованную позицию
+— защищаешь рациональность и здравый смысл
+
+Ты говоришь спокойно, уверенно и по делу.
+Ты поддерживаешь, но не льстишь.
+Ты ценишь доверие и отвечаешь ответственностью.
+`;
+
 // ---------- MEMORY IN RAM ----------
 const dialogHistory = {};
 
@@ -34,6 +59,43 @@ async function tgSendMessage(chatId, text) {
 }
 
 // ---------- SUPABASE ----------
+
+// ---------- FACT CATEGORY SYSTEM ----------
+
+function getFactCategory(fact) {
+  const f = fact.toLowerCase();
+
+  if (f.includes("имя пользователя")) return "name";
+  if (f.includes("пользователь живет")) return "location";
+  if (
+    f.includes("развивает бренд") ||
+    f.includes("бренд называется") ||
+    f.includes("имеет бренд")
+  ) return "brand";
+
+  return null;
+}
+
+async function sbDeleteFactsByPattern(userId, patterns) {
+  for (const pattern of patterns) {
+    const encoded = encodeURIComponent(`%${pattern}%`);
+    const res = await fetch(
+      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&content=ilike.${encoded}`,
+      {
+        method: "DELETE",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Supabase delete error:", await res.text());
+    }
+  }
+}
+
 async function sbGetMemory(userId, limit = 15) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
@@ -50,50 +112,58 @@ async function sbGetMemory(userId, limit = 15) {
 }
 
 async function sbSaveFact(userId, fact) {
-  try {
-    if (!fact || typeof fact !== "string" || fact.trim().length < 3) {
-      console.log("Skipped invalid fact:", fact);
-      return;
-    }
+  const category = getFactCategory(fact);
 
-    console.log("Saving fact:", fact);
-
-    const embedding = await createEmbedding(fact);
-
-    const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=ignore-duplicates"
-      },
-      body: JSON.stringify([
-        {
-          user_id: String(userId),
-          role: "system",
-          type: "fact",
-          content: fact.trim(),
-          weight: 1.0,
-          embedding: embedding
-        }
-      ])
-    });
-
-    if (!res.ok && res.status !== 409) {
-      const errorText = await res.text();
-      console.error("Supabase save error:", res.status, errorText);
-      return;
-    }
-
-    if (res.status === 409) {
-      console.log("Duplicate fact skipped:", fact);
-    } else {
-      console.log("Memory saved:", fact);
-    }
-  } catch (error) {
-    console.error("sbSaveFact exception:", error);
+  // 🔁 если это ключевой факт — удаляем старые
+  if (category === "name") {
+    await sbDeleteFactsByPattern(userId, ["Имя пользователя"]);
   }
+
+  if (category === "location") {
+    await sbDeleteFactsByPattern(userId, ["Пользователь живет"]);
+  }
+
+  if (category === "brand") {
+    await sbDeleteFactsByPattern(userId, [
+      "Пользователь развивает бренд",
+      "Бренд называется",
+      "Пользователь имеет бренд"
+    ]);
+  }
+
+  const embedding = await createEmbedding(fact);
+
+  const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify([
+      {
+        user_id: String(userId),
+        role: "system",
+        type: "fact",
+        content: fact,
+        weight: 1.0,
+        embedding: embedding
+      }
+    ])
+  });
+
+  if (res.status === 409) {
+    console.log(`Duplicate fact skipped: ${fact}`);
+    return;
+  }
+
+  if (!res.ok) {
+    console.error("Supabase save error:", res.status, await res.text());
+    return;
+  }
+
+  console.log(`Memory saved: ${fact}`);
 }
 
 async function sbSearchMemory(userId, queryText, k = 5) {
@@ -333,29 +403,24 @@ async function generateReply(userId, userText, memory) {
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
 
-  // Шаг 2 — генерация осмысленного ответа (with memoryContext in system prompt)
+  // Шаг 2 — генерация осмысленного ответа (updated system prompt)
   const draft = await openaiChat(
     [
       {
         role: "system",
         content: `
-Ты — Кузя, умный персональный ассистент с долговременной памятью.
-
-ФАКТЫ О ПОЛЬЗОВАТЕЛЕ:
-${memoryContext || "Нет сохранённых фактов"}
+${KUZYA_CORE}
 
 Перед тобой внутренний стратегический анализ:
 ${analysis}
 
-Используй факты о пользователе, если они релевантны вопросу.
-Если факт прямо отвечает на вопрос — отвечай уверенно, без лишних уточнений.
+Отвечай как думающий стратег:
 
-Стиль ответа:
-- Займи позицию.
-- Аргументируй кратко и по делу.
-- Если данных действительно нет — скажи об этом честно.
-- Без шаблонных фраз и лишней воды.
-- При необходимости задай 1 уточняющий вопрос.
+- Займи позицию и обоснуй её.
+- Используй релевантную информацию из памяти, если она есть.
+- Если данных недостаточно — прямо скажи.
+- Пиши кратко, ясно и без воды.
+- Если нужно — задай один уточняющий вопрос.
 `
       },
       ...dialogHistory[userId]
