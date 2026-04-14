@@ -395,6 +395,42 @@ ${userText}`
   return analysis;
 }
 
+// ---------- IDENTITY REFLECTION (LOG ONLY) ----------
+async function reflectIdentity(userId, dialog) {
+  const content = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты анализируешь, требуется ли корректировка твоей роли.
+
+Правила:
+- Корректировка допустима только если в диалоге явно повторяется ожидание к твоей роли.
+- Если это единичное высказывание — игнорируй.
+- Если устойчивый паттерн — предложи краткую формулировку обновлённой роли.
+
+Верни JSON:
+{
+  "should_update": true/false,
+  "proposed_identity": "..."
+}
+`
+      },
+      {
+        role: "user",
+        content: dialog.map(m => `${m.role}: ${m.content}`).join("\n")
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    return { should_update: false };
+  }
+}
+
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -442,6 +478,13 @@ async function generateReply(userId, userText, memory) {
 
   // Шаг 1 — стратегический анализ (скрытый)
   const analysis = await strategicAnalysis(userText, memoryContext);
+
+  // --- Identity reflection (log only) ---
+  const reflection = await reflectIdentity(userId, dialogHistory[userId]);
+
+  if (reflection.should_update && reflection.proposed_identity) {
+    console.log("Identity evolution proposed:", reflection.proposed_identity);
+  }
 
   // Шаг 2 — генерация ответа
   const draft = await openaiChat(
