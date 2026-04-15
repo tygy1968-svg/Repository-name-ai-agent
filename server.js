@@ -18,6 +18,10 @@ if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error("One or more API keys / URLs are missing in ENV variables");
 }
 
+// --- TEMP ENV DEBUG ---
+console.log("GOOGLE KEY:", !!GOOGLE_API_KEY);
+console.log("GOOGLE CX:", !!GOOGLE_CX);
+
 // ---------- CONST ----------
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
@@ -426,24 +430,29 @@ async function planStep(userText, memoryContext) {
     [
       {
         role: "system",
-        content: `Ты планировщик.
-Определи:
-1. Тип запроса (analysis / direct / emotional / strategic / web)
-2. Нужно ли использовать память (true/false)
-3. Нужно ли занять позицию (true/false)
-4. Нужен ли поиск в интернете (true/false)
+        content: `
+Ты планировщик.
 
-Интернет нужен, если вопрос:
-- о новостях, трендах, компаниях, ценах, людях, сайтах
-- требует актуальной или неизвестной модели информации
+Если вопрос касается:
+- текущего года
+- трендов
+- новостей
+- компаний
+- людей
+- рынков
+- статистики
+- "сейчас", "в 2026", "на данный момент"
+
+то needs_web = true ВСЕГДА.
 
 Верни строго JSON:
 {
-  "type": "...",
-  "needs_memory": true,
+  "type": "direct",
+  "needs_memory": false,
   "should_take_position": true,
-  "needs_web": true
-}`
+  "needs_web": true/false
+}
+`
       },
       {
         role: "user",
@@ -568,6 +577,9 @@ async function generateReply(userId, userText, memory) {
 
   // Планирование (влияет на стиль ответа, но не блокирует память)
   const plan = await planStep(userText, recentMemoryPreview);
+
+  // --- PLAN LOG ---
+  console.log("PLAN RESULT:", plan);
 
   // --- WEB SEARCH ---
   let webContext = "";
