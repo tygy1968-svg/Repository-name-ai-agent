@@ -9,6 +9,8 @@ const {
   OPENAI_API_KEY,
   SUPABASE_URL,
   SUPABASE_KEY,
+  GOOGLE_API_KEY,
+  GOOGLE_CX,
   PORT = 10000
 } = process.env;
 
@@ -311,6 +313,34 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   return data.choices?.[0]?.message?.content ?? "";
 }
 
+// ---------- GOOGLE SEARCH ----------
+async function googleSearch(query) {
+  if (!GOOGLE_API_KEY || !GOOGLE_CX) {
+    console.log("Google Search not configured");
+    return [];
+  }
+
+  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+    query
+  )}&key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&num=5`;
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!data.items) return [];
+
+    return data.items.map(item => ({
+      title: item.title,
+      snippet: item.snippet,
+      link: item.link
+    }));
+  } catch (error) {
+    console.error("Google search error:", error);
+    return [];
+  }
+}
+
 async function checkIdentityConflict(identity, userText) {
   if (!identity) return { conflict: false };
 
@@ -398,15 +428,21 @@ async function planStep(userText, memoryContext) {
         role: "system",
         content: `Ты планировщик.
 Определи:
-1. Тип запроса (analysis / direct / emotional / strategic)
+1. Тип запроса (analysis / direct / emotional / strategic / web)
 2. Нужно ли использовать память (true/false)
 3. Нужно ли занять позицию (true/false)
+4. Нужен ли поиск в интернете (true/false)
+
+Интернет нужен, если вопрос:
+- о новостях, трендах, компаниях, ценах, людях, сайтах
+- требует актуальной или неизвестной модели информации
 
 Верни строго JSON:
 {
   "type": "...",
   "needs_memory": true,
-  "should_take_position": true
+  "should_take_position": true,
+  "needs_web": true
 }`
       },
       {
@@ -427,7 +463,8 @@ ${userText}`
     return {
       type: "direct",
       needs_memory: false,
-      should_take_position: false
+      should_take_position: false,
+      needs_web: false
     };
   }
 }
@@ -532,6 +569,24 @@ async function generateReply(userId, userText, memory) {
   // Планирование (влияет на стиль ответа, но не блокирует память)
   const plan = await planStep(userText, recentMemoryPreview);
 
+  // --- WEB SEARCH ---
+  let webContext = "";
+
+  if (plan.needs_web) {
+    const results = await googleSearch(userText);
+    if (results.length > 0) {
+      webContext = results
+        .map(
+          (r, i) =>
+            `${i + 1}. ${r.title}\n${r.snippet}\nИсточник: ${r.link}`
+        )
+        .join("\n\n");
+      console.log("Web context used:", webContext);
+    } else {
+      console.log("Web search returned no results");
+    }
+  }
+
   // Векторный поиск памяти выполняем ВСЕГДА
   let relevant = [];
   try {
@@ -584,6 +639,9 @@ ${identity || "нет"}
 ПАМЯТЬ:
 ${memoryContext || "Нет сохранённых фактов"}
 
+ИНТЕРНЕТ-ДАННЫЕ:
+${webContext || "Не использовались"}
+
 Перед тобой внутренний стратегический анализ:
 ${analysis}
 
@@ -595,6 +653,8 @@ ${analysis}
 - Всегда формируй позицию.
 - Если в памяти есть прямой факт по вопросу — отвечай на его основе.
 - Не игнорируй память.
+- Если предоставлены интернет-данные — используй их как источник актуальной информации.
+- При использовании интернет-данных кратко опирайся на их содержание без указания служебных формулировок.
 - Если информации объективно нет — скажи об этом прямо и кратко.
 - Пиши ясно, устойчиво и без воды.
 - При необходимости задай один точный уточняющий вопрос.
