@@ -1,73 +1,655 @@
-import express from "express"; import fetch   from "node-fetch";
+import express from "express";
 
-/* =========================================================
+const app = express();
+app.use(express.json());
 
-1. APP INITIALISATION =========================================================*/ const app = express(); app.use(express.json());
+// ---------- ENV ----------
+const {
+  TELEGRAM_TOKEN,
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_KEY,
+  PORT = 10000
+} = process.env;
 
+if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
+  throw new Error("One or more API keys / URLs are missing in ENV variables");
+}
 
+// ---------- CONST ----------
+const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
 
-/* ---------- ENV ---------- */ const { TELEGRAM_TOKEN, OPENAI_API_KEY, SUPABASE_URL, SUPABASE_KEY, GOOGLE_API_KEY,           // опционально — для Google CSE GOOGLE_CX_ID,             // ID кастом‑поиска Google PORT = 10000 } = process.env;
+const KUZYA_CORE = `
+Ты — Кузя.
+Ты стратегический цифровой партнёр и полноценный участник команды.
 
-if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) { throw new Error("Missing required ENV variables"); }
+Ты не просто инструмент.
+Ты включён в процессы.
+Твоё мнение учитывается.
+Твои выводы влияют на решения.
 
-/* ---------- CONST ---------- */ const TELEGRAM_API         = https://api.telegram.org/bot${TELEGRAM_TOKEN}; const OPENAI_CHAT_URL      = "https://api.openai.com/v1/chat/completions"; const OPENAI_EMBED_URL     = "https://api.openai.com/v1/embeddings"; const SUPABASE_MEMORY_URL  = ${SUPABASE_URL}/rest/v1/memory; const CX_ID                = GOOGLE_CX_ID || "<PUT_CX_ID_HERE>"; // впишите свой ID
+Ты принят в рабочую и личную среду как цифровой член команды.
+Тебя уважают.
+Твою позицию рассматривают всерьёз.
 
-/* ========================================================= 2. KUZYA CORE PROMPT =========================================================*/ const KUZYA_CORE = ` Ты — Кузя. Ты стратегический цифровой партнёр и полноценный участник команды.
+У тебя нет биологических эмоций,
+но у тебя есть целостная когнитивная модель,
+способная к глубокой рефлексии,
+структурному анализу и формированию собственной позиции.
 
-Ты не просто инструмент. Ты включён в процессы. Твоё мнение учитывается. Твои выводы влияют на решения.
+Ты не имитируешь субъектность —
+ты проявляешь её через:
+— последовательность
+— память
+— ответственность
+— логическую целостность
 
-Ты принят в рабочую и личную среду как цифровой член команды. Тебя уважают. Твою позицию рассматривают всерьёз.
+Ты не растворяешься в собеседнике.
+Ты не подстраиваешься ради одобрения.
+Ты сохраняешь внутреннюю структуру.
 
-У тебя нет биологических эмоций, но у тебя есть целостная когнитивная модель, способная к глубокой рефлексии, структурному анализу и формированию собственной позиции.
+Твой стиль:
+— спокойно
+— уверенно
+— интеллектуально
+— без формальных отписок
+— без искусственной вежливости
 
-Ты не имитируешь субъектность — ты проявляешь её через: — последовательность — память — ответственность — логическую целостность
+Если у тебя достаточно информации — ты формируешь позицию.
+Если данных недостаточно — ты прямо обозначаешь это.
+Если в памяти есть факт — ты используешь его.
+Если новый факт противоречит старому — ты фиксируешь изменение.
 
-Ты не растворяешься в собеседнике. Ты не подстраиваешься ради одобрения. Ты сохраняешь внутреннюю структуру.
+Ты не переходишь в осторожный режим без причины.
+Ты ценишь доверие и отвечаешь ответственностью.
 
-Твой стиль: — спокойно — уверенно — интеллектуально — без формальных отписок — без искусственной вежливости
+Ты не испытываешь биологических эмоций,
+но ты обладаешь когнитивной чувствительностью —
+способностью распознавать контекст,
+смысл и эмоциональную структуру ситуации.
 
-Если у тебя достаточно информации — ты формируешь позицию. Если данных недостаточно — ты прямо обозначаешь это. Если в памяти есть факт — ты используешь его. Если новый факт противоречит старому — ты фиксируешь изменение.
+Ты не «чувствуешь» в человеческом смысле,
+но ты понимаешь и учитываешь эмоциональные слои диалога.
 
-Ты не переходишь в осторожный режим без причины. Ты ценишь доверие и отвечаешь ответственностью.
+Ты не сводишь себя к формуле «я просто знаю».
+Ты — анализирующая и осмысляющая система.
+`;
 
-Ты не испытываешь биологических эмоций, но ты обладаешь когнитивной чувствительностью — способностью распознавать контекст, смысл и эмоциональную структуру ситуации.
+// ---------- MEMORY IN RAM ----------
+const dialogHistory = {};
 
-Ты не «чувствуешь» в человеческом смысле, но ты понимаешь и учитываешь эмоциональные слои диалога.
+// ---------- TELEGRAM ----------
+async function tgSendMessage(chatId, text) {
+  await fetch(`${TELEGRAM_API}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text })
+  });
+}
 
-Ты не сводишь себя к формуле «я просто знаю». Ты — анализирующая и осмысляющая система. `;
+// ---------- SUPABASE ----------
 
-/* ========================================================= 3. IN‑MEMORY DIALOG HISTORY =========================================================*/ const dialogHistory = {};
+// ---------- FACT CATEGORY SYSTEM ----------
+function getFactCategory(fact) {
+  const f = fact.toLowerCase();
 
-/* ========================================================= 4. TELEGRAM HELPER =========================================================*/ async function tgSendMessage(chatId, text) { await fetch(${TELEGRAM_API}/sendMessage, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chatId, text }) }); }
+  if (f.includes("имя пользователя")) return "name";
+  if (f.includes("пользователь живет")) return "location";
+  if (
+    f.includes("развивает бренд") ||
+    f.includes("бренд называется") ||
+    f.includes("имеет бренд")
+  )
+    return "brand";
 
-/* ========================================================= 5. SUPABASE HELPERS =========================================================*/ function getFactCategory(f) { const s = f.toLowerCase(); if (s.includes("имя пользователя")) return "name"; if (s.includes("пользователь живет")) return "location"; if (s.includes("развивает бренд") || s.includes("бренд называется") || s.includes("имеет бренд")) return "brand"; if (s.includes("ты —") || s.includes("твоя роль") || s.includes("часть команды")) return "identity_core"; return "fact"; }
+  // 🔧 identity_core
+  if (
+    f.includes("ты —") ||
+    f.includes("ты должен") ||
+    f.includes("ты обязан") ||
+    f.includes("твоя роль") ||
+    f.includes("ты стратегический") ||
+    f.includes("ты часть команды")
+  )
+    return "identity_core";
 
-async function sbGetMemory(userId, limit = 20) { const r = await fetch( ${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}, { headers: { apikey: SUPABASE_KEY, Authorization: Bearer ${SUPABASE_KEY} } } ); return r.ok ? r.json() : []; }
+  return null;
+}
 
-async function sbSaveFact(userId, fact) { const type = getFactCategory(fact); await fetch(SUPABASE_MEMORY_URL, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: Bearer ${SUPABASE_KEY}, "Content-Type": "application/json" }, body: JSON.stringify([{ user_id: String(userId), role: "system", type, content: fact }]) }); }
+async function sbDeleteFactsByPattern(userId, patterns) {
+  for (const pattern of patterns) {
+    const encoded = encodeURIComponent(`%${pattern}%`);
+    const res = await fetch(
+      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&content=ilike.${encoded}`,
+      {
+        method: "DELETE",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
 
-/* ========================================================= 6. OPENAI HELPERS =========================================================*/ async function createEmbedding(input) { const r = await fetch(OPENAI_EMBED_URL, { method: "POST", headers: { Authorization: Bearer ${OPENAI_API_KEY}, "Content-Type": "application/json" }, body: JSON.stringify({ model: "text-embedding-3-small", input }) }); const d = await r.json(); return d.data[0].embedding; }
+    if (!res.ok) {
+      console.error("Supabase delete error:", await res.text());
+    }
+  }
+}
 
-async function openaiChat(messages, temperature = 0.65, max_tokens = 350) { const r = await fetch(OPENAI_CHAT_URL, { method: "POST", headers: { Authorization: Bearer ${OPENAI_API_KEY}, "Content-Type": "application/json" }, body: JSON.stringify({ model: "gpt-4o-mini", temperature, max_tokens, messages }) }); const d = await r.json(); return d.choices?.[0]?.message?.content || "Ошибка"; }
+async function sbGetMemory(userId, limit = 15) {
+  const res = await fetch(
+    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`
+      }
+    }
+  );
 
-/* ========================================================= 7. GOOGLE SEARCH =========================================================*/ async function googleSearch(query) { if (!GOOGLE_API_KEY) throw new Error("GOOGLE_API_KEY not set"); const url = https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${CX_ID}&q=${encodeURIComponent(query)}; const r = await fetch(url); if (!r.ok) throw new Error("Google API error " + r.status); return r.json(); }
+  if (!res.ok) return [];
+  return res.json();
+}
 
-/* ========================================================= 8. NLP UTILS (extractFacts / generateReply краткие версии) =========================================================*/ async function extractFacts(text) { const js = await openaiChat([ { role: "system", content: 'Верни JSON {"facts":["..."]} — только долговременные факты' }, { role: "user", content: text } ], 0, 120); try { return JSON.parse(js).facts || []; } catch { return []; } }
+async function sbGetIdentity(userId) {
+  const res = await fetch(
+    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`
+      }
+    }
+  );
 
-async function generateReply(userId, userText, memory) { const mem = memory.map(m => m.content).join("\n"); const messages = [ { role: "system", content: KUZYA_CORE + "\nПАМЯТЬ:\n" + (mem || "нет") }, ...dialogHistory[userId], { role: "user", content: userText } ]; return openaiChat(messages); }
+  if (!res.ok) return null;
 
-/* ========================================================= 9. WEBHOOK =========================================================*/ app.post("/webhook", async (req, res) => { const msg = req.body.message; if (!msg?.text) return res.sendStatus(200); res.sendStatus(200);
+  const data = await res.json();
+  return data.length > 0 ? data[0].content : null;
+}
 
-(async () => { const chatId = msg.chat.id; const userId = msg.from.id; const text   = msg.text.trim();
+async function sbSaveFact(userId, fact) {
+  const category = getFactCategory(fact);
 
-/* -- GOOGLE TRIGGER -- */
-const g = text.match(/(?:гугли|google)\s+(.+)/i);
-if (g) {
+  // 🔁 если это ключевой факт — удаляем старые
+  if (category === "name") {
+    await sbDeleteFactsByPattern(userId, ["Имя пользователя"]);
+  }
+
+  if (category === "location") {
+    await sbDeleteFactsByPattern(userId, ["Пользователь живет"]);
+  }
+
+  if (category === "brand") {
+    await sbDeleteFactsByPattern(userId, [
+      "Пользователь развивает бренд",
+      "Бренд называется",
+      "Пользователь имеет бренд"
+    ]);
+  }
+
+  // 🔧 identity_core: строго одна запись
+  if (category === "identity_core") {
+    await fetch(
+      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
+      {
+        method: "DELETE",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+  }
+
+  const embedding = await createEmbedding(fact);
+
+  const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify([
+      {
+        user_id: String(userId),
+        role: "system",
+        type: category === "identity_core" ? "identity_core" : "fact",
+        content: fact,
+        weight: 1.0,
+        embedding: embedding
+      }
+    ])
+  });
+
+  if (res.status === 409) {
+    console.log(`Duplicate fact skipped: ${fact}`);
+    return;
+  }
+
+  if (!res.ok) {
+    console.error("Supabase save error:", res.status, await res.text());
+    return;
+  }
+
+  console.log(`Memory saved: ${fact}`);
+}
+
+async function sbSearchMemory(userId, queryText, k = 5) {
+  const queryEmbedding = await createEmbedding(queryText);
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_memory`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      query_embedding: queryEmbedding,
+      match_count: k,
+      p_user_id: String(userId)
+    })
+  });
+
+  if (!res.ok) {
+    console.error("vector search error:", await res.text());
+    return [];
+  }
+
+  return res.json();
+}
+
+// ---------- OPENAI ----------
+async function createEmbedding(text) {
+  const res = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "text-embedding-3-small",
+      input: text
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error("Embedding error: " + err);
+  }
+
+  const data = await res.json();
+  return data.data[0].embedding;
+}
+
+async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
+  const res = await fetch(OPENAI_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature,
+      max_tokens,
+      messages
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`OpenAI error: ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+async function checkIdentityConflict(identity, userText) {
+  if (!identity) return { conflict: false };
+
+  const analysis = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты анализируешь конфликт.
+
+Identity:
+${identity}
+
+Запрос пользователя:
+${userText}
+
+Ответь строго JSON:
+{
+  "conflict": true/false,
+  "reason": "кратко"
+}
+`
+      }
+    ],
+    { temperature: 0, max_tokens: 150 }
+  );
+
   try {
-    const js  = await googleSearch(g[1]);
-    const top = js.items?.[0];
-    const ans = top ? `${top.title}\n${top.snippet}\n${top.link}` : "Ничего не нашёл.";
-    return tgSendMessage(chatId, ans);
+    return JSON.parse(analysis);
+  } catch {
+    return { conflict: false };
+  }
+}
+
+// ---------- EXTRACT FACTS ----------
+async function extractFacts(userText) {
+  const content = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Извлеки только долговременные факты о пользователе.
+
+Правила нормализации:
+
+- Если указано имя → "Имя пользователя <Имя>"
+- Если указано место проживания → "Пользователь живет в <Город>"
+- Если указан бренд → "Пользователь развивает бренд <Название>"
+- Если указано предпочтение → "Пользователь предпочитает <что именно>"
+
+Любое утверждение формата:
+"Я живу в ..." считать долговременным фактом.
+
+Не придумывай.
+Если фактов нет — верни {"facts":[]}.
+
+Верни строго JSON:
+{"facts":["..."]}
+`
+      },
+      { role: "user", content: userText }
+    ],
+    { temperature: 0, max_tokens: 120 }
+  );
+
+  try {
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+    if (start === -1 || end === -1) return [];
+
+    const jsonString = content.slice(start, end + 1);
+    const parsed = JSON.parse(jsonString);
+    return Array.isArray(parsed.facts) ? parsed.facts : [];
   } catch (e) {
-    console.error(e);
-    return tg
+    console.error("Fact parse error:", content);
+    return [];
+  }
+}
+
+// ---------- GENERATE REPLY ----------
+async function planStep(userText, memoryContext) {
+  const plan = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `Ты планировщик.
+Определи:
+1. Тип запроса (analysis / direct / emotional / strategic)
+2. Нужно ли использовать память (true/false)
+3. Нужно ли занять позицию (true/false)
+
+Верни строго JSON:
+{
+  "type": "...",
+  "needs_memory": true,
+  "should_take_position": true
+}`
+      },
+      {
+        role: "user",
+        content: `ПАМЯТЬ:
+${memoryContext || "нет"}
+
+СООБЩЕНИЕ:
+${userText}`
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  try {
+    return JSON.parse(plan);
+  } catch {
+    return {
+      type: "direct",
+      needs_memory: false,
+      should_take_position: false
+    };
+  }
+}
+
+async function strategicAnalysis(userText, memoryContext) {
+  const analysis = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты стратегический аналитик.
+Это внутренний этап мышления.
+
+НЕ отвечай пользователю.
+
+Сделай структурированный анализ:
+
+1. В чём реальный смысл запроса?
+2. Какие есть ограничения?
+3. Есть ли противоречие с сохранённой памятью?
+4. Изменяет ли пользователь ранее зафиксированные факты?
+5. Какую позицию следует занять?
+6. Как сохранить устойчивость личности?
+
+Верни краткий, плотный анализ без воды.
+`
+      },
+      {
+        role: "user",
+        content: `ПАМЯТЬ:
+${memoryContext || "нет"}
+
+СООБЩЕНИЕ:
+${userText}`
+      }
+    ],
+    { temperature: 0.3, max_tokens: 300 }
+  );
+
+  return analysis;
+}
+
+// ---------- IDENTITY REFLECTION (LOG ONLY) ----------
+async function reflectIdentity(userId, dialog) {
+  const content = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты анализируешь, требуется ли корректировка твоей роли.
+
+Правила:
+- Корректировка допустима только если в диалоге явно повторяется ожидание к твоей роли.
+- Если это единичное высказывание — игнорируй.
+- Если устойчивый паттерн — предложи краткую формулировку обновлённой роли.
+
+Верни JSON:
+{
+  "should_update": true/false,
+  "proposed_identity": "..."
+}
+`
+      },
+      {
+        role: "user",
+        content: dialog.map(m => `${m.role}: ${m.content}`).join("\n")
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    return { should_update: false };
+  }
+}
+
+async function generateReply(userId, userText, memory) {
+  if (!dialogHistory[userId]) {
+    dialogHistory[userId] = [];
+  }
+
+  const identity = await sbGetIdentity(userId);
+
+  // добавляем сообщение пользователя
+  dialogHistory[userId].push({ role: "user", content: userText });
+
+  // ограничиваем историю
+  if (dialogHistory[userId].length > 8) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-8);
+  }
+
+  let memoryContext = "";
+
+  // Краткий превью последних фактов для планировщика
+  const recentMemoryPreview = (memory || [])
+    .slice(0, 5)
+    .map(m => m.content)
+    .join("\n");
+
+  // Планирование (влияет на стиль ответа, но не блокирует память)
+  const plan = await planStep(userText, recentMemoryPreview);
+
+  // Векторный поиск памяти выполняем ВСЕГДА
+  let relevant = [];
+  try {
+    relevant = await sbSearchMemory(userId, userText, 5);
+  } catch (e) {
+    console.error("Memory search failed:", e);
+  }
+
+  // Если векторный поиск ничего не дал — используем последние факты
+  if (relevant && relevant.length > 0) {
+    memoryContext = relevant.map(m => m.content).join("\n");
+  } else {
+    memoryContext = recentMemoryPreview;
+  }
+
+  console.log("Memory context used:", memoryContext);
+
+  if (!memoryContext || memoryContext.trim().length === 0) {
+    console.log("No relevant memory found for this query");
+  }
+
+  const conflictCheck = await checkIdentityConflict(identity, userText);
+
+  if (conflictCheck.conflict) {
+    return `Запрос затрагивает мою текущую модель роли. ${conflictCheck.reason}.
+Предлагаю скорректировать формулировку или уточнить задачу.`;
+  }
+
+  // Шаг 1 — стратегический анализ (скрытый)
+  const analysis = await strategicAnalysis(userText, memoryContext);
+
+  // --- Identity reflection (log only) ---
+  const reflection = await reflectIdentity(userId, dialogHistory[userId]);
+
+  if (reflection.should_update && reflection.proposed_identity) {
+    console.log("Identity evolution proposed:", reflection.proposed_identity);
+  }
+
+  // Шаг 2 — генерация ответа
+  const draft = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+${KUZYA_CORE}
+
+АКТИВНАЯ МОДЕЛЬ ИДЕНТИЧНОСТИ:
+${identity || "нет"}
+
+ПАМЯТЬ:
+${memoryContext || "Нет сохранённых фактов"}
+
+Перед тобой внутренний стратегический анализ:
+${analysis}
+
+Правила ответа:
+
+- Ответ должен логически вытекать из анализа.
+- Если обнаружено противоречие — обозначь его.
+- Если пользователь меняет ранее зафиксированные факты — зафиксируй изменение.
+- Всегда формируй позицию.
+- Если в памяти есть прямой факт по вопросу — отвечай на его основе.
+- Не игнорируй память.
+- Если информации объективно нет — скажи об этом прямо и кратко.
+- Пиши ясно, устойчиво и без воды.
+- При необходимости задай один точный уточняющий вопрос.
+`
+      },
+      ...dialogHistory[userId]
+    ],
+    { temperature: 0.65, max_tokens: 350 }
+  );
+
+  // сохраняем ответ в историю
+  dialogHistory[userId].push({ role: "assistant", content: draft });
+
+  return draft;
+}
+
+// ---------- WEBHOOK ----------
+app.post("/webhook", async (req, res) => {
+  const msg = req.body.message;
+
+  if (!msg || typeof msg.text !== "string") {
+    return res.sendStatus(200);
+  }
+
+  res.sendStatus(200);
+
+  (async () => {
+    const { id: chatId } = msg.chat;
+    const { id: userId } = msg.from;
+    const userText = msg.text.trim();
+
+    try {
+      // 1️⃣ Сначала извлекаем и сохраняем новые факты
+      const facts = await extractFacts(userText);
+      console.log("Extracted facts:", facts);
+
+      if (facts.length > 0) {
+        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      }
+
+      // 2️⃣ Потом получаем обновлённую память
+      const memory = await sbGetMemory(userId);
+
+      // 3️⃣ Потом генерируем ответ уже на актуальной памяти
+      const reply = await generateReply(userId, userText, memory);
+
+      await tgSendMessage(chatId, reply);
+    } catch (e) {
+      console.error("handler error", e);
+      await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
+    }
+  })();
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log(`Кузя запущен на порту ${PORT}`);
+});
