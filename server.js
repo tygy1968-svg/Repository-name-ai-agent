@@ -320,7 +320,7 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
 // ---------- GOOGLE SEARCH ----------
 async function googleSearch(query) {
   if (!GOOGLE_API_KEY || !GOOGLE_CX) {
-    console.log("Google Search not configured");
+    console.log("❌ Google Search not configured");
     return [];
   }
 
@@ -328,11 +328,25 @@ async function googleSearch(query) {
     query
   )}&key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&num=5`;
 
+  console.log("🔎 Google URL:", url);
+
   try {
     const res = await fetch(url);
     const data = await res.json();
 
-    if (!data.items) return [];
+    console.log("📦 Google raw response:", JSON.stringify(data, null, 2));
+
+    if (data.error) {
+      console.error("🚨 Google API ERROR:", data.error);
+      return [];
+    }
+
+    if (!data.items || data.items.length === 0) {
+      console.log("⚠️ Google returned no items");
+      return [];
+    }
+
+    console.log("✅ Google returned", data.items.length, "results");
 
     return data.items.map(item => ({
       title: item.title,
@@ -340,7 +354,7 @@ async function googleSearch(query) {
       link: item.link
     }));
   } catch (error) {
-    console.error("Google search error:", error);
+    console.error("🔥 Google search exception:", error);
     return [];
   }
 }
