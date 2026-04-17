@@ -9,7 +9,6 @@ const {
   OPENAI_API_KEY,
   SUPABASE_URL,
   SUPABASE_KEY,
-  SERP_API_KEY,
   PORT = 10000
 } = process.env;
 
@@ -18,7 +17,7 @@ if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 // --- TEMP ENV DEBUG ---
-console.log("SERP API:", !!SERP_API_KEY);
+console.log("SERP API:", !!process.env.SERP_API_KEY);
 
 // ---------- CONST ----------
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
@@ -317,14 +316,16 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
 
 // ---------- SERP SEARCH ----------
 async function googleSearch(query) {
-  if (!SERP_API_KEY) {
+  const key = process.env.SERP_API_KEY;
+
+  if (!key) {
     console.log("❌ SERP API key not configured");
     return [];
   }
 
   const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
     query
-  )}&api_key=${SERP_API_KEY}&hl=ru&gl=ua`;
+  )}&api_key=${key}&hl=ru&gl=ua`;
 
   const safeUrl = url.replace(/api_key=[^&]+/i, "api_key=***");
   console.log("🔎 SERP URL:", safeUrl);
@@ -332,8 +333,6 @@ async function googleSearch(query) {
   try {
     const res = await fetch(url);
     const data = await res.json();
-
-    console.log("📦 SERP raw response:", JSON.stringify(data, null, 2));
 
     if (!data.organic_results || data.organic_results.length === 0) {
       console.log("⚠️ SERP returned no organic results");
