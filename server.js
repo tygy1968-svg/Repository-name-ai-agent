@@ -9,8 +9,7 @@ const {
   OPENAI_API_KEY,
   SUPABASE_URL,
   SUPABASE_KEY,
-  GOOGLE_API_KEY,
-  GOOGLE_CX,
+  SERP_API_KEY,
   PORT = 10000
 } = process.env;
 
@@ -19,8 +18,7 @@ if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 // --- TEMP ENV DEBUG ---
-console.log("GOOGLE KEY:", !!GOOGLE_API_KEY);
-console.log("GOOGLE CX:", !!GOOGLE_CX);
+console.log("SERP API:", !!SERP_API_KEY);
 
 // ---------- CONST ----------
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
@@ -317,44 +315,40 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   return data.choices?.[0]?.message?.content ?? "";
 }
 
-// ---------- GOOGLE SEARCH ----------
+// ---------- SERP SEARCH ----------
 async function googleSearch(query) {
-  if (!GOOGLE_API_KEY || !GOOGLE_CX) {
-    console.log("❌ Google Search not configured");
+  if (!SERP_API_KEY) {
+    console.log("❌ SERP API key not configured");
     return [];
   }
 
-  const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(
+  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
     query
-  )}&key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX}&num=5`;
+  )}&api_key=${SERP_API_KEY}&hl=ru&gl=ua`;
 
-  console.log("🔎 Google URL:", url);
+  const safeUrl = url.replace(/api_key=[^&]+/i, "api_key=***");
+  console.log("🔎 SERP URL:", safeUrl);
 
   try {
     const res = await fetch(url);
     const data = await res.json();
 
-    console.log("📦 Google raw response:", JSON.stringify(data, null, 2));
+    console.log("📦 SERP raw response:", JSON.stringify(data, null, 2));
 
-    if (data.error) {
-      console.error("🚨 Google API ERROR:", data.error);
+    if (!data.organic_results || data.organic_results.length === 0) {
+      console.log("⚠️ SERP returned no organic results");
       return [];
     }
 
-    if (!data.items || data.items.length === 0) {
-      console.log("⚠️ Google returned no items");
-      return [];
-    }
+    console.log("✅ SERP returned", data.organic_results.length, "results");
 
-    console.log("✅ Google returned", data.items.length, "results");
-
-    return data.items.map(item => ({
+    return data.organic_results.slice(0, 5).map(item => ({
       title: item.title,
       snippet: item.snippet,
       link: item.link
     }));
   } catch (error) {
-    console.error("🔥 Google search exception:", error);
+    console.error("🔥 SERP search exception:", error);
     return [];
   }
 }
