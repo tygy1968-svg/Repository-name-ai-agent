@@ -429,6 +429,33 @@ async function extractFacts(userText) {
   }
 }
 
+// ---------- MEMORY FILTER ----------
+function isUsefulMemoryLine(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = text.trim();
+
+  if (t.length < 6 || t.length > 160) return false;
+
+  if (
+    /выбраны составы|продукт уже изготовлен|планируется разлить|поставить в продажу/i.test(
+      t
+    )
+  )
+    return false;
+
+  if (/^(ок|okay|спасибо|привет|здравствуйте)$/i.test(t)) return false;
+
+  return true;
+}
+
+function pickMemoryLines(rows, limit = 5) {
+  const lines = (rows || [])
+    .map(r => (typeof r === "string" ? r : r?.content))
+    .filter(isUsefulMemoryLine);
+
+  return lines.slice(0, limit);
+}
+
 // ---------- GENERATE REPLY ----------
 async function planStep(userText, memoryContext) {
   const plan = await openaiChat(
@@ -496,13 +523,8 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  // ---- Память ----
-  const recentMemoryPreview = (memory || [])
-    .slice(0, 5)
-    .map(m => m.content)
-    .join("\n");
+  const recentMemoryPreview = pickMemoryLines(memory, 5).join("\n");
 
-  // ---- Интернет (если нужно) ----
   const plan = await planStep(userText, recentMemoryPreview);
 
   let webContext = "";
@@ -516,7 +538,6 @@ async function generateReply(userId, userText, memory) {
     }
   }
 
-  // ---- Векторный поиск памяти ----
   let relevant = [];
   try {
     relevant = await sbSearchMemory(userId, userText, 5);
@@ -525,14 +546,14 @@ async function generateReply(userId, userText, memory) {
   }
 
   let memoryContext = "";
+  const relevantLines = pickMemoryLines(relevant, 5);
 
-  if (relevant && relevant.length > 0) {
-    memoryContext = relevant.map(m => m.content).join("\n");
+  if (relevantLines.length > 0) {
+    memoryContext = relevantLines.join("\n");
   } else {
     memoryContext = recentMemoryPreview;
   }
 
-  // ---- Генерация ответа (БЕЗ стратегического анализа) ----
   const draft = await openaiChat(
     [
       {
@@ -576,16 +597,16 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
+  dialogHistory[userId].push({
+    role: "user",
+    content: "[Пользователь отправил фото]"
+  });
 
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  const memoryContext = (memory || [])
-    .slice(0, 10)
-    .map(m => m.content)
-    .join("\n");
+  const memoryContext = pickMemoryLines(memory, 8).join("\n");
 
   const messages = [
     {
@@ -613,7 +634,10 @@ ${memoryContext || "Нет сохранённых фактов"}
     }
   ];
 
-  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
+  const reply = await openaiChat(messages, {
+    temperature: 0.4,
+    max_tokens: 350
+  });
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
@@ -659,6 +683,24 @@ app.post("/webhook", async (req, res) => {
       }
 
       const userText = msg.text.trim();
+
+      // ✅ COMMAND: "запомни ..."
+      // Примеры:
+      //   "запомни: я живу в Киеве"
+      //   "запомни важно: мой бренд AMADORA"
+      const rememberMatch = userText.match(
+        /^\s*запомни(?:\s+важно)?\s*:?\s*(.+)\s*$/i
+      );
+      if (rememberMatch && rememberMatch[1]) {
+        const factRaw = rememberMatch[1].trim();
+        if (factRaw.length > 0) {
+          await sbSaveFact(userId, factRaw);
+          await tgSendMessage(chatId, "Запомнила.");
+        } else {
+          await tgSendMessage(chatId, "Ок. Что именно запомнить?");
+        }
+        return;
+      }
 
       // 1️⃣ Сначала извлекаем и сохраняем новые факты
       const facts = await extractFacts(userText);
