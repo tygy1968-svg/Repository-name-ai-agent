@@ -690,11 +690,63 @@ ${analysis}
   return draft;
 }
 
+// ---------- GENERATE VISION REPLY ----------
+async function generateVisionReply(userId, imageUrl, memory) {
+  if (!dialogHistory[userId]) {
+    dialogHistory[userId] = [];
+  }
+
+  // фиксируем в истории, что пришло фото (без url в тексте)
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
+
+  if (dialogHistory[userId].length > 8) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-8);
+  }
+
+  // память берём так же, как и в текстовом режиме
+  const memoryContext = (memory || [])
+    .slice(0, 10)
+    .map(m => m.content)
+    .join("\n");
+
+  const messages = [
+    {
+      role: "system",
+      content: `
+${KUZYA_CORE}
+
+ПАМЯТЬ (факты о пользователе):
+${memoryContext || "Нет сохранённых фактов"}
+
+Пользователь отправил изображение.
+Твоя задача:
+- Опиши, что на изображении.
+- Если это похоже на запрос по уходу/косметике/продукту — дай практичный вывод.
+- Если не хватает данных — задай один точный уточняющий вопрос.
+- Кратко, по делу, без воды.
+`
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Проанализируй изображение и ответь пользователю." },
+        { type: "image_url", image_url: { url: imageUrl } }
+      ]
+    }
+  ];
+
+  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
+
+  dialogHistory[userId].push({ role: "assistant", content: reply });
+
+  return reply;
+}
+
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
 
-  if (!msg || typeof msg.text !== "string") {
+  if (!msg) {
     return res.sendStatus(200);
   }
 
@@ -703,9 +755,33 @@ app.post("/webhook", async (req, res) => {
   (async () => {
     const { id: chatId } = msg.chat;
     const { id: userId } = msg.from;
-    const userText = msg.text.trim();
 
     try {
+      // --- PHOTO HANDLER ---
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+
+        const fileRes = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+        const fileData = await fileRes.json();
+
+        const filePath = fileData.result.file_path;
+        const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+        const memory = await sbGetMemory(userId);
+
+        const reply = await generateVisionReply(userId, imageUrl, memory);
+
+        await tgSendMessage(chatId, reply);
+        return;
+      }
+
+      // --- TEXT HANDLER ---
+      if (typeof msg.text !== "string") {
+        return;
+      }
+
+      const userText = msg.text.trim();
+
       // 1️⃣ Сначала извлекаем и сохраняем новые факты
       const facts = await extractFacts(userText);
       console.log("Extracted facts:", facts);
