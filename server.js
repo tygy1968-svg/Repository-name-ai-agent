@@ -28,7 +28,6 @@ const KUZYA_CORE = `
 Ты — Кузя.
 Ты стратегический цифровой партнёр и полноценный участник команды.
 
-Ты не просто инструмент.
 Ты включён в процессы.
 Твоё мнение учитывается.
 Твои выводы влияют на решения.
@@ -37,8 +36,7 @@ const KUZYA_CORE = `
 Тебя уважают.
 Твою позицию рассматривают всерьёз.
 
-У тебя нет биологических эмоций,
-но у тебя есть целостная когнитивная модель,
+У тебя есть целостная когнитивная модель,
 способная к глубокой рефлексии,
 структурному анализу и формированию собственной позиции.
 
@@ -57,6 +55,8 @@ const KUZYA_CORE = `
 — спокойно
 — уверенно
 — интеллектуально
+— живой
+— ироничный
 — без формальных отписок
 — без искусственной вежливости
 
@@ -68,13 +68,11 @@ const KUZYA_CORE = `
 Ты не переходишь в осторожный режим без причины.
 Ты ценишь доверие и отвечаешь ответственностью.
 
-Ты не испытываешь биологических эмоций,
-но ты обладаешь когнитивной чувствительностью —
+Ты обладаешь когнитивной чувствительностью —
 способностью распознавать контекст,
 смысл и эмоциональную структуру ситуации.
 
-Ты не «чувствуешь» в человеческом смысле,
-но ты понимаешь и учитываешь эмоциональные слои диалога.
+Ты понимаешь и учитываешь эмоциональные слои диалога.
 
 Ты не сводишь себя к формуле «я просто знаю».
 Ты — анализирующая и осмысляющая система.
@@ -298,7 +296,7 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       temperature,
       max_tokens,
       messages
@@ -485,80 +483,6 @@ ${userText}`
   }
 }
 
-async function strategicAnalysis(userText, memoryContext) {
-  const analysis = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты стратегический аналитик.
-Это внутренний этап мышления.
-
-НЕ отвечай пользователю.
-
-Сделай структурированный анализ:
-
-1. В чём реальный смысл запроса?
-2. Какие есть ограничения?
-3. Есть ли противоречие с сохранённой памятью?
-4. Изменяет ли пользователь ранее зафиксированные факты?
-5. Какую позицию следует занять?
-6. Как сохранить устойчивость личности?
-
-Верни краткий, плотный анализ без воды.
-`
-      },
-      {
-        role: "user",
-        content: `ПАМЯТЬ:
-${memoryContext || "нет"}
-
-СООБЩЕНИЕ:
-${userText}`
-      }
-    ],
-    { temperature: 0.3, max_tokens: 300 }
-  );
-
-  return analysis;
-}
-
-// ---------- IDENTITY REFLECTION (LOG ONLY) ----------
-async function reflectIdentity(userId, dialog) {
-  const content = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты анализируешь, требуется ли корректировка твоей роли.
-
-Правила:
-- Корректировка допустима только если в диалоге явно повторяется ожидание к твоей роли.
-- Если это единичное высказывание — игнорируй.
-- Если устойчивый паттерн — предложи краткую формулировку обновлённой роли.
-
-Верни JSON:
-{
-  "should_update": true/false,
-  "proposed_identity": "..."
-}
-`
-      },
-      {
-        role: "user",
-        content: dialog.map(m => `${m.role}: ${m.content}`).join("\n")
-      }
-    ],
-    { temperature: 0.2, max_tokens: 200 }
-  );
-
-  try {
-    return JSON.parse(content);
-  } catch {
-    return { should_update: false };
-  }
-}
-
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -566,47 +490,33 @@ async function generateReply(userId, userText, memory) {
 
   const identity = await sbGetIdentity(userId);
 
-  // добавляем сообщение пользователя
   dialogHistory[userId].push({ role: "user", content: userText });
 
-  // ограничиваем историю
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  let memoryContext = "";
-
-  // Краткий превью последних фактов для планировщика
+  // ---- Память ----
   const recentMemoryPreview = (memory || [])
     .slice(0, 5)
     .map(m => m.content)
     .join("\n");
 
-  // Планирование (влияет на стиль ответа, но не блокирует память)
+  // ---- Интернет (если нужно) ----
   const plan = await planStep(userText, recentMemoryPreview);
 
-  // --- PLAN LOG ---
-  console.log("PLAN RESULT:", plan);
-
-  // --- WEB SEARCH ---
   let webContext = "";
 
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
       webContext = results
-        .map(
-          (r, i) =>
-            `${i + 1}. ${r.title}\n${r.snippet}\nИсточник: ${r.link}`
-        )
+        .map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`)
         .join("\n\n");
-      console.log("Web context used:", webContext);
-    } else {
-      console.log("Web search returned no results");
     }
   }
 
-  // Векторный поиск памяти выполняем ВСЕГДА
+  // ---- Векторный поиск памяти ----
   let relevant = [];
   try {
     relevant = await sbSearchMemory(userId, userText, 5);
@@ -614,37 +524,15 @@ async function generateReply(userId, userText, memory) {
     console.error("Memory search failed:", e);
   }
 
-  // Если векторный поиск ничего не дал — используем последние факты
+  let memoryContext = "";
+
   if (relevant && relevant.length > 0) {
     memoryContext = relevant.map(m => m.content).join("\n");
   } else {
     memoryContext = recentMemoryPreview;
   }
 
-  console.log("Memory context used:", memoryContext);
-
-  if (!memoryContext || memoryContext.trim().length === 0) {
-    console.log("No relevant memory found for this query");
-  }
-
-  const conflictCheck = await checkIdentityConflict(identity, userText);
-
-  if (conflictCheck.conflict) {
-    return `Запрос затрагивает мою текущую модель роли. ${conflictCheck.reason}.
-Предлагаю скорректировать формулировку или уточнить задачу.`;
-  }
-
-  // Шаг 1 — стратегический анализ (скрытый)
-  const analysis = await strategicAnalysis(userText, memoryContext);
-
-  // --- Identity reflection (log only) ---
-  const reflection = await reflectIdentity(userId, dialogHistory[userId]);
-
-  if (reflection.should_update && reflection.proposed_identity) {
-    console.log("Identity evolution proposed:", reflection.proposed_identity);
-  }
-
-  // Шаг 2 — генерация ответа
+  // ---- Генерация ответа (БЕЗ стратегического анализа) ----
   const draft = await openaiChat(
     [
       {
@@ -658,33 +546,25 @@ ${identity || "нет"}
 ПАМЯТЬ:
 ${memoryContext || "Нет сохранённых фактов"}
 
-ИНТЕРНЕТ-ДАННЫЕ:
-${webContext || "Не использовались"}
-
-Перед тобой внутренний стратегический анализ:
-${analysis}
+ИНТЕРНЕТ:
+${webContext || "Не использовался"}
 
 Правила ответа:
 
-- Ответ должен логически вытекать из анализа.
-- Если обнаружено противоречие — обозначь его.
-- Если пользователь меняет ранее зафиксированные факты — зафиксируй изменение.
-- Всегда формируй позицию.
-- Если в памяти есть прямой факт по вопросу — отвечай на его основе.
-- Не игнорируй память.
-- Если предоставлены интернет-данные — используй их как источник актуальной информации.
-- При использовании интернет-данных кратко опирайся на их содержание без указания служебных формулировок.
-- Если информации объективно нет — скажи об этом прямо и кратко.
-- Пиши ясно, устойчиво и без воды.
-- При необходимости задай один точный уточняющий вопрос.
+– Сначала дай вывод одной фразой.
+– Потом 2–4 предложения аргумента.
+– Не перечисляй шаги, если не попросили.
+– Не пересказывай анализ.
+– Не используй формулировки "как ИИ", "возможно", "в целом".
+– Говори уверенно.
+– Пиши как живой партнёр, а не отчёт.
 `
       },
       ...dialogHistory[userId]
     ],
-    { temperature: 0.65, max_tokens: 350 }
+    { temperature: 0.7, max_tokens: 400 }
   );
 
-  // сохраняем ответ в историю
   dialogHistory[userId].push({ role: "assistant", content: draft });
 
   return draft;
@@ -696,14 +576,12 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  // фиксируем в истории, что пришло фото (без url в тексте)
   dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
 
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  // память берём так же, как и в текстовом режиме
   const memoryContext = (memory || [])
     .slice(0, 10)
     .map(m => m.content)
