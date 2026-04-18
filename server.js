@@ -494,8 +494,9 @@ async function generateReply(userId, userText, memory) {
 
   dialogHistory[userId].push({ role: "user", content: userText });
 
-  if (dialogHistory[userId].length > 8) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-8);
+  // ✅ history limit: 30
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
   // --- ПАМЯТЬ ---
@@ -516,9 +517,7 @@ async function generateReply(userId, userText, memory) {
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
-      webContext = results
-        .map(r => `${r.title}\n${r.snippet}`)
-        .join("\n\n");
+      webContext = results.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
     }
   }
 
@@ -582,6 +581,11 @@ ${KUZYA_CORE}
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
+  // ✅ keep 30 after assistant message too
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
+  }
+
   return reply;
 }
 
@@ -591,10 +595,14 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
+  dialogHistory[userId].push({
+    role: "user",
+    content: "[Пользователь отправил фото]"
+  });
 
-  if (dialogHistory[userId].length > 8) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-8);
+  // ✅ history limit: 30
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
   const memoryContext = (memory || [])
@@ -631,6 +639,11 @@ ${memoryContext || "Нет сохранённых фактов"}
   const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
+
+  // ✅ keep 30 after assistant message too
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
+  }
 
   return reply;
 }
