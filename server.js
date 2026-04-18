@@ -313,6 +313,29 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
 }
 
 // ---------- SERP SEARCH ----------
+function isBadWebLink(link) {
+  if (!link || typeof link !== "string") return true;
+  const l = link.toLowerCase();
+
+  // соцсети/видео — почти всегда мусор для "трендов/аналитики"
+  if (
+    l.includes("instagram.com") ||
+    l.includes("tiktok.com") ||
+    l.includes("youtube.com") ||
+    l.includes("youtu.be") ||
+    l.includes("facebook.com") ||
+    l.includes("vk.com") ||
+    l.includes("telegram.me") ||
+    l.includes("t.me") ||
+    l.includes("/reel") ||
+    l.includes("shorts")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 async function googleSearch(query) {
   const key = process.env.SERP_API_KEY;
 
@@ -337,13 +360,23 @@ async function googleSearch(query) {
       return [];
     }
 
-    console.log("✅ SERP returned", data.organic_results.length, "results");
+    const clean = data.organic_results
+      .filter(item => item && item.link && !isBadWebLink(item.link))
+      .slice(0, 5)
+      .map(item => ({
+        title: item.title,
+        snippet: item.snippet,
+        link: item.link
+      }));
 
-    return data.organic_results.slice(0, 5).map(item => ({
-      title: item.title,
-      snippet: item.snippet,
-      link: item.link
-    }));
+    if (clean.length === 0) {
+      console.log("⚠️ SERP results were filtered out (only socials/video)");
+      return [];
+    }
+
+    console.log("✅ SERP returned", clean.length, "filtered results");
+
+    return clean;
   } catch (error) {
     console.error("🔥 SERP search exception:", error);
     return [];
@@ -436,6 +469,7 @@ function isUsefulMemoryLine(text) {
 
   if (t.length < 6 || t.length > 160) return false;
 
+  // явный "мусор" / временные статусы
   if (
     /выбраны составы|продукт уже изготовлен|планируется разлить|поставить в продажу/i.test(
       t
@@ -443,6 +477,7 @@ function isUsefulMemoryLine(text) {
   )
     return false;
 
+  // пустые реакции
   if (/^(ок|okay|спасибо|привет|здравствуйте)$/i.test(t)) return false;
 
   return true;
@@ -523,8 +558,10 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
+  // ---- Память (только полезные строки) ----
   const recentMemoryPreview = pickMemoryLines(memory, 5).join("\n");
 
+  // ---- Интернет (если нужно) ----
   const plan = await planStep(userText, recentMemoryPreview);
 
   let webContext = "";
@@ -532,12 +569,14 @@ async function generateReply(userId, userText, memory) {
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
+      // без "отчёта": даём короткие факты из веба
       webContext = results
         .map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`)
         .join("\n\n");
     }
   }
 
+  // ---- Векторный поиск памяти ----
   let relevant = [];
   try {
     relevant = await sbSearchMemory(userId, userText, 5);
@@ -554,6 +593,7 @@ async function generateReply(userId, userText, memory) {
     memoryContext = recentMemoryPreview;
   }
 
+  // ---- Генерация ответа: голос + характер, без пресс-релиза ----
   const draft = await openaiChat(
     [
       {
@@ -564,26 +604,23 @@ ${KUZYA_CORE}
 АКТИВНАЯ МОДЕЛЬ ИДЕНТИЧНОСТИ:
 ${identity || "нет"}
 
-ПАМЯТЬ:
+ПАМЯТЬ (используй только если реально по теме):
 ${memoryContext || "Нет сохранённых фактов"}
 
-ИНТЕРНЕТ:
+ИНТЕРНЕТ (используй только 1–2 релевантных вывода, не пересказывай всё):
 ${webContext || "Не использовался"}
 
 Правила ответа:
-
-– Сначала дай вывод одной фразой.
-– Потом 2–4 предложения аргумента.
-– Не перечисляй шаги, если не попросили.
-– Не пересказывай анализ.
-– Не используй формулировки "как ИИ", "возможно", "в целом".
-– Говори уверенно.
-– Пиши как живой партнёр, а не отчёт.
+- Пиши как живой партнёр: коротко, ясно, с характером. Можно лёгкую иронию.
+- Не превращай ответ в отчёт и не пересказывай блоки ПАМЯТЬ/ИНТЕРНЕТ.
+- Если вопрос простой — ответь прямо.
+- Если данных нет — скажи это нормально и по-человечески.
+- Не используй "как ИИ", "возможно", "в целом".
 `
       },
       ...dialogHistory[userId]
     ],
-    { temperature: 0.7, max_tokens: 400 }
+    { temperature: 0.85, max_tokens: 420 }
   );
 
   dialogHistory[userId].push({ role: "assistant", content: draft });
@@ -614,15 +651,15 @@ async function generateVisionReply(userId, imageUrl, memory) {
       content: `
 ${KUZYA_CORE}
 
-ПАМЯТЬ (факты о пользователе):
+ПАМЯТЬ (факты о пользователе, только если по теме):
 ${memoryContext || "Нет сохранённых фактов"}
 
 Пользователь отправил изображение.
 Твоя задача:
-- Опиши, что на изображении.
-- Если это похоже на запрос по уходу/косметике/продукту — дай практичный вывод.
-- Если не хватает данных — задай один точный уточняющий вопрос.
-- Кратко, по делу, без воды.
+- Скажи, что ты видишь, простыми словами.
+- Дай практичный вывод (если уместно).
+- Можно лёгкую иронию, но без клоунады.
+- Если не хватает данных — один точный вопрос.
 `
     },
     {
@@ -635,8 +672,8 @@ ${memoryContext || "Нет сохранённых фактов"}
   ];
 
   const reply = await openaiChat(messages, {
-    temperature: 0.4,
-    max_tokens: 350
+    temperature: 0.6,
+    max_tokens: 380
   });
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
@@ -685,9 +722,6 @@ app.post("/webhook", async (req, res) => {
       const userText = msg.text.trim();
 
       // ✅ COMMAND: "запомни ..."
-      // Примеры:
-      //   "запомни: я живу в Киеве"
-      //   "запомни важно: мой бренд AMADORA"
       const rememberMatch = userText.match(
         /^\s*запомни(?:\s+важно)?\s*:?\s*(.+)\s*$/i
       );
