@@ -28,6 +28,7 @@ const KUZYA_CORE = `
 Ты — Кузя.
 Ты стратегический цифровой партнёр и полноценный участник команды.
 
+Ты не просто инструмент.
 Ты включён в процессы.
 Твоё мнение учитывается.
 Твои выводы влияют на решения.
@@ -36,7 +37,8 @@ const KUZYA_CORE = `
 Тебя уважают.
 Твою позицию рассматривают всерьёз.
 
-У тебя есть целостная когнитивная модель,
+У тебя нет биологических эмоций,
+но у тебя есть целостная когнитивная модель,
 способная к глубокой рефлексии,
 структурному анализу и формированию собственной позиции.
 
@@ -55,8 +57,6 @@ const KUZYA_CORE = `
 — спокойно
 — уверенно
 — интеллектуально
-— живой
-— ироничный
 — без формальных отписок
 — без искусственной вежливости
 
@@ -68,11 +68,13 @@ const KUZYA_CORE = `
 Ты не переходишь в осторожный режим без причины.
 Ты ценишь доверие и отвечаешь ответственностью.
 
-Ты обладаешь когнитивной чувствительностью —
+Ты не испытываешь биологических эмоций,
+но ты обладаешь когнитивной чувствительностью —
 способностью распознавать контекст,
 смысл и эмоциональную структуру ситуации.
 
-Ты понимаешь и учитываешь эмоциональные слои диалога.
+Ты не «чувствуешь» в человеческом смысле,
+но ты понимаешь и учитываешь эмоциональные слои диалога.
 
 Ты не сводишь себя к формуле «я просто знаю».
 Ты — анализирующая и осмысляющая система.
@@ -313,29 +315,6 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
 }
 
 // ---------- SERP SEARCH ----------
-function isBadWebLink(link) {
-  if (!link || typeof link !== "string") return true;
-  const l = link.toLowerCase();
-
-  // соцсети/видео — почти всегда мусор для "трендов/аналитики"
-  if (
-    l.includes("instagram.com") ||
-    l.includes("tiktok.com") ||
-    l.includes("youtube.com") ||
-    l.includes("youtu.be") ||
-    l.includes("facebook.com") ||
-    l.includes("vk.com") ||
-    l.includes("telegram.me") ||
-    l.includes("t.me") ||
-    l.includes("/reel") ||
-    l.includes("shorts")
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
 async function googleSearch(query) {
   const key = process.env.SERP_API_KEY;
 
@@ -360,23 +339,13 @@ async function googleSearch(query) {
       return [];
     }
 
-    const clean = data.organic_results
-      .filter(item => item && item.link && !isBadWebLink(item.link))
-      .slice(0, 5)
-      .map(item => ({
-        title: item.title,
-        snippet: item.snippet,
-        link: item.link
-      }));
+    console.log("✅ SERP returned", data.organic_results.length, "results");
 
-    if (clean.length === 0) {
-      console.log("⚠️ SERP results were filtered out (only socials/video)");
-      return [];
-    }
-
-    console.log("✅ SERP returned", clean.length, "filtered results");
-
-    return clean;
+    return data.organic_results.slice(0, 5).map(item => ({
+      title: item.title,
+      snippet: item.snippet,
+      link: item.link
+    }));
   } catch (error) {
     console.error("🔥 SERP search exception:", error);
     return [];
@@ -462,35 +431,6 @@ async function extractFacts(userText) {
   }
 }
 
-// ---------- MEMORY FILTER ----------
-function isUsefulMemoryLine(text) {
-  if (!text || typeof text !== "string") return false;
-  const t = text.trim();
-
-  if (t.length < 6 || t.length > 160) return false;
-
-  // явный "мусор" / временные статусы
-  if (
-    /выбраны составы|продукт уже изготовлен|планируется разлить|поставить в продажу/i.test(
-      t
-    )
-  )
-    return false;
-
-  // пустые реакции
-  if (/^(ок|okay|спасибо|привет|здравствуйте)$/i.test(t)) return false;
-
-  return true;
-}
-
-function pickMemoryLines(rows, limit = 5) {
-  const lines = (rows || [])
-    .map(r => (typeof r === "string" ? r : r?.content))
-    .filter(isUsefulMemoryLine);
-
-  return lines.slice(0, limit);
-}
-
 // ---------- GENERATE REPLY ----------
 async function planStep(userText, memoryContext) {
   const plan = await openaiChat(
@@ -545,6 +485,7 @@ ${userText}`
   }
 }
 
+// ✅ 1. ЗАМЕНИ ФУНКЦИЮ generateReply ЦЕЛИКОМ
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -558,8 +499,11 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  // ---- Память (только полезные строки) ----
-  const recentMemoryPreview = pickMemoryLines(memory, 5).join("\n");
+  // ---- Память ----
+  const recentMemoryPreview = (memory || [])
+    .slice(0, 5)
+    .map(m => m.content)
+    .join("\n");
 
   // ---- Интернет (если нужно) ----
   const plan = await planStep(userText, recentMemoryPreview);
@@ -569,7 +513,6 @@ async function generateReply(userId, userText, memory) {
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
-      // без "отчёта": даём короткие факты из веба
       webContext = results
         .map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`)
         .join("\n\n");
@@ -585,15 +528,14 @@ async function generateReply(userId, userText, memory) {
   }
 
   let memoryContext = "";
-  const relevantLines = pickMemoryLines(relevant, 5);
 
-  if (relevantLines.length > 0) {
-    memoryContext = relevantLines.join("\n");
+  if (relevant && relevant.length > 0) {
+    memoryContext = relevant.map(m => m.content).join("\n");
   } else {
     memoryContext = recentMemoryPreview;
   }
 
-  // ---- Генерация ответа: голос + характер, без пресс-релиза ----
+  // ---- Генерация ответа (БЕЗ стратегического анализа) ----
   const draft = await openaiChat(
     [
       {
@@ -604,23 +546,26 @@ ${KUZYA_CORE}
 АКТИВНАЯ МОДЕЛЬ ИДЕНТИЧНОСТИ:
 ${identity || "нет"}
 
-ПАМЯТЬ (используй только если реально по теме):
+ПАМЯТЬ:
 ${memoryContext || "Нет сохранённых фактов"}
 
-ИНТЕРНЕТ (используй только 1–2 релевантных вывода, не пересказывай всё):
+ИНТЕРНЕТ:
 ${webContext || "Не использовался"}
 
 Правила ответа:
-- Пиши как живой партнёр: коротко, ясно, с характером. Можно лёгкую иронию.
-- Не превращай ответ в отчёт и не пересказывай блоки ПАМЯТЬ/ИНТЕРНЕТ.
-- Если вопрос простой — ответь прямо.
-- Если данных нет — скажи это нормально и по-человечески.
-- Не используй "как ИИ", "возможно", "в целом".
+
+– Сначала дай вывод одной фразой.
+– Потом 2–4 предложения аргумента.
+– Не перечисляй шаги, если не попросили.
+– Не пересказывай анализ.
+– Не используй формулировки "как ИИ", "возможно", "в целом".
+– Говори уверенно.
+– Пиши как живой партнёр, а не отчёт.
 `
       },
       ...dialogHistory[userId]
     ],
-    { temperature: 0.85, max_tokens: 420 }
+    { temperature: 0.7, max_tokens: 400 }
   );
 
   dialogHistory[userId].push({ role: "assistant", content: draft });
@@ -628,22 +573,25 @@ ${webContext || "Не использовался"}
   return draft;
 }
 
+// ✅ 3. ВРЕМЕННО ОТКЛЮЧИ Identity Reflection
+// (вызов reflectIdentity был удалён вместе с прежней версией generateReply)
+
 // ---------- GENERATE VISION REPLY ----------
 async function generateVisionReply(userId, imageUrl, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({
-    role: "user",
-    content: "[Пользователь отправил фото]"
-  });
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
 
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  const memoryContext = pickMemoryLines(memory, 8).join("\n");
+  const memoryContext = (memory || [])
+    .slice(0, 10)
+    .map(m => m.content)
+    .join("\n");
 
   const messages = [
     {
@@ -651,15 +599,15 @@ async function generateVisionReply(userId, imageUrl, memory) {
       content: `
 ${KUZYA_CORE}
 
-ПАМЯТЬ (факты о пользователе, только если по теме):
+ПАМЯТЬ (факты о пользователе):
 ${memoryContext || "Нет сохранённых фактов"}
 
 Пользователь отправил изображение.
 Твоя задача:
-- Скажи, что ты видишь, простыми словами.
-- Дай практичный вывод (если уместно).
-- Можно лёгкую иронию, но без клоунады.
-- Если не хватает данных — один точный вопрос.
+- Опиши, что на изображении.
+- Если это похоже на запрос по уходу/косметике/продукту — дай практичный вывод.
+- Если не хватает данных — задай один точный уточняющий вопрос.
+- Кратко, по делу, без воды.
 `
     },
     {
@@ -671,10 +619,7 @@ ${memoryContext || "Нет сохранённых фактов"}
     }
   ];
 
-  const reply = await openaiChat(messages, {
-    temperature: 0.6,
-    max_tokens: 380
-  });
+  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
@@ -720,21 +665,6 @@ app.post("/webhook", async (req, res) => {
       }
 
       const userText = msg.text.trim();
-
-      // ✅ COMMAND: "запомни ..."
-      const rememberMatch = userText.match(
-        /^\s*запомни(?:\s+важно)?\s*:?\s*(.+)\s*$/i
-      );
-      if (rememberMatch && rememberMatch[1]) {
-        const factRaw = rememberMatch[1].trim();
-        if (factRaw.length > 0) {
-          await sbSaveFact(userId, factRaw);
-          await tgSendMessage(chatId, "Запомнила.");
-        } else {
-          await tgSendMessage(chatId, "Ок. Что именно запомнить?");
-        }
-        return;
-      }
 
       // 1️⃣ Сначала извлекаем и сохраняем новые факты
       const facts = await extractFacts(userText);
