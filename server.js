@@ -485,7 +485,6 @@ ${userText}`
   }
 }
 
-// ✅ generateReply (заменена целиком, синтаксис проверен)
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -517,7 +516,9 @@ async function generateReply(userId, userText, memory) {
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
-      webContext = results.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
+      webContext = results
+        .map(r => `${r.title}\n${r.snippet}`)
+        .join("\n\n");
     }
   }
 
@@ -575,7 +576,7 @@ ${KUZYA_CORE}
   ];
 
   const reply = await openaiChat(messages, {
-    temperature: 0.9,
+    temperature: 0.7,
     max_tokens: 450
   });
 
@@ -590,10 +591,7 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({
-    role: "user",
-    content: "[Пользователь отправил фото]"
-  });
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
 
   if (dialogHistory[userId].length > 8) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
