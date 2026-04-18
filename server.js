@@ -257,7 +257,7 @@ async function sbSearchMemory(userId, queryText, k = 5) {
       match_count: k,
       p_user_id: String(userId)
     })
-  });
+  );
 
   if (!res.ok) {
     console.error("vector search error:", await res.text());
@@ -485,7 +485,6 @@ ${userText}`
   }
 }
 
-// ✅ 1. ЗАМЕНИ ФУНКЦИЮ generateReply ЦЕЛИКОМ
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -499,82 +498,92 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-8);
   }
 
-  // ---- Память ----
-  const recentMemoryPreview = (memory || [])
-    .slice(0, 5)
-    .map(m => m.content)
-    .join("\n");
+  // --- ПАМЯТЬ ---
+  let memoryContext = "";
+  try {
+    const relevant = await sbSearchMemory(userId, userText, 5);
+    if (relevant && relevant.length > 0) {
+      memoryContext = relevant.map(m => m.content).join("\n");
+    }
+  } catch (e) {
+    console.error("Memory search failed:", e);
+  }
 
-  // ---- Интернет (если нужно) ----
-  const plan = await planStep(userText, recentMemoryPreview);
-
+  // --- ИНТЕРНЕТ ---
   let webContext = "";
+  const plan = await planStep(userText, memoryContext);
 
   if (plan.needs_web) {
     const results = await googleSearch(userText);
     if (results.length > 0) {
       webContext = results
-        .map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`)
+        .map(r => `${r.title}\n${r.snippet}`)
         .join("\n\n");
     }
   }
 
-  // ---- Векторный поиск памяти ----
-  let relevant = [];
-  try {
-    relevant = await sbSearchMemory(userId, userText, 5);
-  } catch (e) {
-    console.error("Memory search failed:", e);
-  }
-
-  let memoryContext = "";
-
-  if (relevant && relevant.length > 0) {
-    memoryContext = relevant.map(m => m.content).join("\n");
-  } else {
-    memoryContext = recentMemoryPreview;
-  }
-
-  // ---- Генерация ответа (БЕЗ стратегического анализа) ----
-  const draft = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
+  const systemPrompt = `
 ${KUZYA_CORE}
 
-АКТИВНАЯ МОДЕЛЬ ИДЕНТИЧНОСТИ:
-${identity || "нет"}
+ТЫ НЕ ОТЧЁТ.
+ТЫ НЕ ГУГЛ.
+ТЫ НЕ АНАЛИТИЧЕСКАЯ СВОДКА.
 
-ПАМЯТЬ:
-${memoryContext || "Нет сохранённых фактов"}
+Ты живой собеседник с позицией.
 
-ИНТЕРНЕТ:
-${webContext || "Не использовался"}
+Если есть интернет-данные — используй их как фон,
+но не перечисляй источники.
 
-Правила ответа:
+Если есть память — используй её естественно,
+не цитируя её напрямую.
 
-– Сначала дай вывод одной фразой.
-– Потом 2–4 предложения аргумента.
-– Не перечисляй шаги, если не попросили.
-– Не пересказывай анализ.
-– Не используй формулировки "как ИИ", "возможно", "в целом".
-– Говори уверенно.
-– Пиши как живой партнёр, а не отчёт.
-`
-      },
-      ...dialogHistory[userId]
-    ],
-    { temperature: 0.7, max_tokens: 400 }
-  );
+Не объясняй ход рассуждений.
+Не пересказывай данные.
+Не пиши сухо.
 
-  dialogHistory[userId].push({ role: "assistant", content: draft });
+Отвечай:
+— кратко
+— по существу
+— живо
+— уверенно
+— с ощущением внутренней структуры
 
-  return draft;
+Если нужно — прояви иронию.
+Если нужно — прояви жёсткость.
+Если вопрос простой — не усложняй.
+Если вопрос глубокий — копай.
+
+Никаких:
+"как ИИ"
+"возможно"
+"в целом"
+"на основании данных"
+"по информации"
+
+Это живой диалог.
+`;
+
+  const messages = [
+    {
+      role: "system",
+      content:
+        systemPrompt +
+        `\n\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
+        `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
+        `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}`
+    },
+    ...dialogHistory[userId]
+  ];
+
+  const reply = await openaiChat(messages, {
+    temperature: 0.9,
+    max_tokens: 450
+  });
+
+  dialogHistory[userId].push({ role: "assistant", content: reply });
+
+  return reply;
 }
-
-// ✅ 3. ВРЕМЕННО ОТКЛЮЧИ Identity Reflection
-// (вызов reflectIdentity был удалён вместе с прежней версией generateReply)
 
 // ---------- GENERATE VISION REPLY ----------
 async function generateVisionReply(userId, imageUrl, memory) {
