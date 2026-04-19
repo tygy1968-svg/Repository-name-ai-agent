@@ -82,6 +82,7 @@ const KUZYA_CORE = `
 
 // ---------- MEMORY IN RAM ----------
 const dialogHistory = {};
+const dialogState = {};
 
 // ---------- TELEGRAM ----------
 async function tgSendMessage(chatId, text) {
@@ -485,6 +486,49 @@ ${userText}`
   }
 }
 
+async function updateDialogState(userId, userText, assistantReply) {
+  if (!dialogState[userId]) {
+    dialogState[userId] = {};
+  }
+
+  const analysis = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты фиксируешь состояние диалога.
+
+Ответь строго JSON:
+
+{
+  "mode": "тип режима (анализ / стратегия / бытовой / философия / разбор)",
+  "goal": "куда движется разговор",
+  "open_loop": "какой узел ещё не закрыт",
+  "road": "тип движения (копаем / структурируем / спорим / проектируем)"
+}
+`
+      },
+      {
+        role: "user",
+        content: `
+ПОСЛЕДНЕЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:
+${userText}
+
+ПОСЛЕДНИЙ ОТВЕТ АССИСТЕНТА:
+${assistantReply}
+`
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  try {
+    dialogState[userId] = JSON.parse(analysis);
+  } catch {
+    dialogState[userId] = dialogState[userId] || {};
+  }
+}
+
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) {
     dialogHistory[userId] = [];
@@ -494,7 +538,6 @@ async function generateReply(userId, userText, memory) {
 
   dialogHistory[userId].push({ role: "user", content: userText });
 
-  // ✅ history limit: 30
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
@@ -562,6 +605,8 @@ ${KUZYA_CORE}
 Это живой диалог.
 `;
 
+  const state = dialogState[userId] || {};
+
   const messages = [
     {
       role: "system",
@@ -569,7 +614,13 @@ ${KUZYA_CORE}
         systemPrompt +
         `\n\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
-        `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}`
+        `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
+        `\n\nСОСТОЯНИЕ ДИАЛОГА:\n` +
+        `Режим: ${state.mode || "не определён"}\n` +
+        `Цель: ${state.goal || "не определена"}\n` +
+        `Незакрытый узел: ${state.open_loop || "нет"}\n` +
+        `Дорога: ${state.road || "не определена"}\n` +
+        `\n\nТы обязан удерживать дорогу и незакрытый узел.`
     },
     ...dialogHistory[userId]
   ];
@@ -581,7 +632,13 @@ ${KUZYA_CORE}
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
-  // ✅ keep 30 after assistant message too
+  // ✅ safeguard so bot always replies even if state update fails
+  try {
+    await updateDialogState(userId, userText, reply);
+  } catch (e) {
+    console.error("updateDialogState failed:", e);
+  }
+
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
@@ -595,12 +652,8 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({
-    role: "user",
-    content: "[Пользователь отправил фото]"
-  });
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
 
-  // ✅ history limit: 30
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
@@ -640,7 +693,6 @@ ${memoryContext || "Нет сохранённых фактов"}
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
-  // ✅ keep 30 after assistant message too
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
