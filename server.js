@@ -409,7 +409,7 @@ async function planStep(userText, memoryContext) {
   }
 }
 
-// ---------- DIALOG STATE ----------
+// ---------- DIALOG STATE (INVARIANT activeTopic) ----------
 async function updateDialogState(userId, userText, assistantReply) {
   if (!dialogState[userId]) {
     dialogState[userId] = { activeTopic: "", openLoop: "", position: "", summary: "" };
@@ -430,10 +430,7 @@ async function updateDialogState(userId, userText, assistantReply) {
 Ответ строго в JSON.
 `
       },
-      {
-        role: "user",
-        content: `Пользователь: ${userText}\nАссистент: ${assistantReply}`
-      }
+      { role: "user", content: `Пользователь: ${userText}\nАссистент: ${assistantReply}` }
     ],
     { temperature: 0.2, max_tokens: 200 }
   );
@@ -442,12 +439,22 @@ async function updateDialogState(userId, userText, assistantReply) {
     const start = analysis.indexOf("{");
     const end = analysis.lastIndexOf("}");
     if (start === -1 || end === -1) return;
-    dialogState[userId] = JSON.parse(analysis.slice(start, end + 1));
+
+    const newState = JSON.parse(analysis.slice(start, end + 1));
+
+    // ✅ Инвариант: activeTopic не переписываем, если он уже задан
+    dialogState[userId] = {
+      activeTopic: dialogState[userId].activeTopic || newState.activeTopic || "",
+      openLoop: newState.openLoop || "",
+      position: newState.position || "",
+      summary: newState.summary || ""
+    };
   } catch (e) {
     console.error("updateDialogState parse error:", e);
   }
 }
 
+// ---------- VALIDATOR ----------
 async function validateAnswer(userId, draftReply) {
   const state = dialogState[userId] || {};
 
@@ -482,6 +489,7 @@ async function validateAnswer(userId, draftReply) {
     const start = validation.indexOf("{");
     const end = validation.lastIndexOf("}");
     if (start === -1 || end === -1) return { isWeak: false, reason: "" };
+
     const parsed = JSON.parse(validation.slice(start, end + 1));
     return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
   } catch (e) {
@@ -586,7 +594,6 @@ ${KUZYA_CORE}
 
   console.log("STATE BEFORE REPLY:", dialogState[userId]);
 
-  // draft -> validate -> maybe strengthen
   let draftReply = await openaiChat(messages, { temperature: 0.7, max_tokens: 450 });
 
   const validation = await validateAnswer(userId, draftReply);
