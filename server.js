@@ -82,7 +82,15 @@ const KUZYA_CORE = `
 
 // ---------- MEMORY IN RAM ----------
 const dialogHistory = {};
+
+// ✅ STATE LAYER (RAM)
 const dialogState = {};
+// dialogState[userId] = {
+//   activeTopic: "",
+//   openLoop: "",
+//   position: "",
+//   summary: ""
+// };
 
 // ---------- TELEGRAM ----------
 async function tgSendMessage(chatId, text) {
@@ -486,9 +494,15 @@ ${userText}`
   }
 }
 
+// ✅ NEW minimal state updater (activeTopic/openLoop/position/summary)
 async function updateDialogState(userId, userText, assistantReply) {
   if (!dialogState[userId]) {
-    dialogState[userId] = {};
+    dialogState[userId] = {
+      activeTopic: "",
+      openLoop: "",
+      position: "",
+      summary: ""
+    };
   }
 
   const analysis = await openaiChat(
@@ -496,36 +510,37 @@ async function updateDialogState(userId, userText, assistantReply) {
       {
         role: "system",
         content: `
-Ты фиксируешь состояние диалога.
+Ты анализатор диалога.
+Коротко и конкретно определи:
+1) О чём сейчас разговор на самом деле (activeTopic)
+2) Что осталось незакрытым (openLoop)
+3) Какую позицию занимает ассистент (position)
+4) Сожми смысл последних шагов в 1–2 предложения (summary)
 
-Ответь строго JSON:
-
-{
-  "mode": "тип режима (анализ / стратегия / бытовой / философия / разбор)",
-  "goal": "куда движется разговор",
-  "open_loop": "какой узел ещё не закрыт",
-  "road": "тип движения (копаем / структурируем / спорим / проектируем)"
-}
+Ответ строго в JSON.
 `
       },
       {
         role: "user",
         content: `
-ПОСЛЕДНЕЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:
-${userText}
-
-ПОСЛЕДНИЙ ОТВЕТ АССИСТЕНТА:
-${assistantReply}
+Пользователь: ${userText}
+Ассистент: ${assistantReply}
 `
       }
     ],
     { temperature: 0.2, max_tokens: 200 }
   );
 
+  // Надёжный парсинг
   try {
-    dialogState[userId] = JSON.parse(analysis);
-  } catch {
-    dialogState[userId] = dialogState[userId] || {};
+    const start = analysis.indexOf("{");
+    const end = analysis.lastIndexOf("}");
+    if (start === -1 || end === -1) return;
+
+    const jsonString = analysis.slice(start, end + 1);
+    dialogState[userId] = JSON.parse(jsonString);
+  } catch (e) {
+    console.error("updateDialogState parse error:", e);
   }
 }
 
@@ -615,12 +630,11 @@ ${KUZYA_CORE}
         `\n\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
         `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
-        `\n\nСОСТОЯНИЕ ДИАЛОГА:\n` +
-        `Режим: ${state.mode || "не определён"}\n` +
-        `Цель: ${state.goal || "не определена"}\n` +
-        `Незакрытый узел: ${state.open_loop || "нет"}\n` +
-        `Дорога: ${state.road || "не определена"}\n` +
-        `\n\nТы обязан удерживать дорогу и незакрытый узел.`
+        `\n\nТекущее состояние диалога:\n${JSON.stringify(state)}\n\n` +
+        `Удерживай activeTopic.\n` +
+        `Закрывай openLoop.\n` +
+        `Сохраняй позицию.\n` +
+        `Не уходи в общие фразы.\n`
     },
     ...dialogHistory[userId]
   ];
@@ -632,7 +646,7 @@ ${KUZYA_CORE}
 
   dialogHistory[userId].push({ role: "assistant", content: reply });
 
-  // ✅ safeguard so bot always replies even if state update fails
+  // ✅ safe state update (doesn't block replying)
   try {
     await updateDialogState(userId, userText, reply);
   } catch (e) {
@@ -652,7 +666,10 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = [];
   }
 
-  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
+  dialogHistory[userId].push({
+    role: "user",
+    content: "[Пользователь отправил фото]"
+  });
 
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
