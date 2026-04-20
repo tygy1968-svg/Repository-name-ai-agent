@@ -531,7 +531,6 @@ async function updateDialogState(userId, userText, assistantReply) {
     { temperature: 0.2, max_tokens: 200 }
   );
 
-  // Надёжный парсинг
   try {
     const start = analysis.indexOf("{");
     const end = analysis.lastIndexOf("}");
@@ -541,6 +540,67 @@ async function updateDialogState(userId, userText, assistantReply) {
     dialogState[userId] = JSON.parse(jsonString);
   } catch (e) {
     console.error("updateDialogState parse error:", e);
+  }
+}
+
+// 🔴 validateAnswer (added рядом с updateDialogState)
+async function validateAnswer(userId, draftReply) {
+  const state = dialogState[userId] || {};
+
+  const validation = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты логический валидатор ответа.
+
+Проверь:
+1) Связан ли ответ с activeTopic?
+2) Закрывает ли openLoop?
+3) Есть ли причинно-следственная связь?
+4) Есть ли абстрактные фразы без конкретики?
+
+Ответ строго JSON:
+{
+  "isWeak": true,
+  "reason": "короткое объяснение"
+}
+или
+{
+  "isWeak": false,
+  "reason": ""
+}
+`
+      },
+      {
+        role: "user",
+        content: `
+Состояние диалога:
+${JSON.stringify(state)}
+
+Ответ ассистента:
+${draftReply}
+`
+      }
+    ],
+    { temperature: 0.2, max_tokens: 200 }
+  );
+
+  // safe JSON parse
+  try {
+    const start = validation.indexOf("{");
+    const end = validation.lastIndexOf("}");
+    if (start === -1 || end === -1) return { isWeak: false, reason: "" };
+
+    const jsonString = validation.slice(start, end + 1);
+    const parsed = JSON.parse(jsonString);
+    return {
+      isWeak: parsed.isWeak === true,
+      reason: typeof parsed.reason === "string" ? parsed.reason : ""
+    };
+  } catch (e) {
+    console.error("validateAnswer parse error:", e);
+    return { isWeak: false, reason: "" };
   }
 }
 
@@ -639,16 +699,44 @@ ${KUZYA_CORE}
     ...dialogHistory[userId]
   ];
 
-  const reply = await openaiChat(messages, {
+  // 🔴 STEP 2: draft -> validate -> (optional) strengthen -> updateState -> return
+  let draftReply = await openaiChat(messages, {
     temperature: 0.7,
     max_tokens: 450
   });
 
-  dialogHistory[userId].push({ role: "assistant", content: reply });
+  let validation = { isWeak: false, reason: "" };
+  try {
+    validation = await validateAnswer(userId, draftReply);
+  } catch (e) {
+    console.error("validateAnswer failed:", e);
+  }
+
+  if (validation.isWeak) {
+    draftReply = await openaiChat(
+      [
+        ...messages,
+        {
+          role: "system",
+          content: `
+Предыдущий ответ был слабым: ${validation.reason}
+
+Усиль логическую связь.
+Сошлись на activeTopic.
+Закрой openLoop.
+Убери абстракции.
+`
+        }
+      ],
+      { temperature: 0.7, max_tokens: 450 }
+    );
+  }
+
+  dialogHistory[userId].push({ role: "assistant", content: draftReply });
 
   // ✅ safe state update (doesn't block replying)
   try {
-    await updateDialogState(userId, userText, reply);
+    await updateDialogState(userId, userText, draftReply);
   } catch (e) {
     console.error("updateDialogState failed:", e);
   }
@@ -657,7 +745,7 @@ ${KUZYA_CORE}
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
-  return reply;
+  return draftReply;
 }
 
 // ---------- GENERATE VISION REPLY ----------
