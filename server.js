@@ -83,14 +83,9 @@ const KUZYA_CORE = `
 // ---------- MEMORY IN RAM ----------
 const dialogHistory = {};
 
-// ✅ STATE LAYER (RAM)
+// ---------- DIALOG STATE IN RAM ----------
 const dialogState = {};
-// dialogState[userId] = {
-//   activeTopic: "",
-//   openLoop: "",
-//   position: "",
-//   summary: ""
-// };
+// dialogState[userId] = { activeTopic:"", openLoop:"", position:"", summary:"" };
 
 // ---------- TELEGRAM ----------
 async function tgSendMessage(chatId, text) {
@@ -105,7 +100,7 @@ async function tgSendMessage(chatId, text) {
 
 // ---------- FACT CATEGORY SYSTEM ----------
 function getFactCategory(fact) {
-  const f = fact.toLowerCase();
+  const f = String(fact || "").toLowerCase();
 
   if (f.includes("имя пользователя")) return "name";
   if (f.includes("пользователь живет")) return "location";
@@ -116,7 +111,7 @@ function getFactCategory(fact) {
   )
     return "brand";
 
-  // 🔧 identity_core
+  // identity_core
   if (
     f.includes("ты —") ||
     f.includes("ты должен") ||
@@ -137,10 +132,7 @@ async function sbDeleteFactsByPattern(userId, patterns) {
       `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&content=ilike.${encoded}`,
       {
         method: "DELETE",
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
       }
     );
 
@@ -153,12 +145,7 @@ async function sbDeleteFactsByPattern(userId, patterns) {
 async function sbGetMemory(userId, limit = 15) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
-    {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
 
   if (!res.ok) return [];
@@ -168,16 +155,10 @@ async function sbGetMemory(userId, limit = 15) {
 async function sbGetIdentity(userId) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
-    {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
 
   if (!res.ok) return null;
-
   const data = await res.json();
   return data.length > 0 ? data[0].content : null;
 }
@@ -185,15 +166,12 @@ async function sbGetIdentity(userId) {
 async function sbSaveFact(userId, fact) {
   const category = getFactCategory(fact);
 
-  // 🔁 если это ключевой факт — удаляем старые
   if (category === "name") {
     await sbDeleteFactsByPattern(userId, ["Имя пользователя"]);
   }
-
   if (category === "location") {
     await sbDeleteFactsByPattern(userId, ["Пользователь живет"]);
   }
-
   if (category === "brand") {
     await sbDeleteFactsByPattern(userId, [
       "Пользователь развивает бренд",
@@ -202,16 +180,12 @@ async function sbSaveFact(userId, fact) {
     ]);
   }
 
-  // 🔧 identity_core: строго одна запись
   if (category === "identity_core") {
     await fetch(
       `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
       {
         method: "DELETE",
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
       }
     );
   }
@@ -233,7 +207,7 @@ async function sbSaveFact(userId, fact) {
         type: category === "identity_core" ? "identity_core" : "fact",
         content: fact,
         weight: 1.0,
-        embedding: embedding
+        embedding
       }
     ])
   });
@@ -284,10 +258,7 @@ async function createEmbedding(text) {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      model: "text-embedding-3-small",
-      input: text
-    })
+    body: JSON.stringify({ model: "text-embedding-3-small", input: text })
   });
 
   if (!res.ok) {
@@ -302,16 +273,8 @@ async function createEmbedding(text) {
 async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      temperature,
-      max_tokens,
-      messages
-    })
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o", temperature, max_tokens, messages })
   });
 
   if (!res.ok) {
@@ -332,10 +295,7 @@ async function googleSearch(query) {
     return [];
   }
 
-  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
-    query
-  )}&api_key=${key}&hl=ru&gl=ua`;
-
+  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${key}&hl=ru&gl=ua`;
   const safeUrl = url.replace(/api_key=[^&]+/i, "api_key=***");
   console.log("🔎 SERP URL:", safeUrl);
 
@@ -361,40 +321,6 @@ async function googleSearch(query) {
   }
 }
 
-async function checkIdentityConflict(identity, userText) {
-  if (!identity) return { conflict: false };
-
-  const analysis = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты анализируешь конфликт.
-
-Identity:
-${identity}
-
-Запрос пользователя:
-${userText}
-
-Ответь строго JSON:
-{
-  "conflict": true/false,
-  "reason": "кратко"
-}
-`
-      }
-    ],
-    { temperature: 0, max_tokens: 150 }
-  );
-
-  try {
-    return JSON.parse(analysis);
-  } catch {
-    return { conflict: false };
-  }
-}
-
 // ---------- EXTRACT FACTS ----------
 async function extractFacts(userText) {
   const content = await openaiChat(
@@ -405,14 +331,12 @@ async function extractFacts(userText) {
 Извлеки только долговременные факты о пользователе.
 
 Правила нормализации:
-
 - Если указано имя → "Имя пользователя <Имя>"
 - Если указано место проживания → "Пользователь живет в <Город>"
 - Если указан бренд → "Пользователь развивает бренд <Название>"
 - Если указано предпочтение → "Пользователь предпочитает <что именно>"
 
-Любое утверждение формата:
-"Я живу в ..." считать долговременным фактом.
+Любое утверждение формата "Я живу в ..." считать долговременным фактом.
 
 Не придумывай.
 Если фактов нет — верни {"facts":[]}.
@@ -440,7 +364,7 @@ async function extractFacts(userText) {
   }
 }
 
-// ---------- GENERATE REPLY ----------
+// ---------- PLAN STEP ----------
 async function planStep(userText, memoryContext) {
   const plan = await openaiChat(
     [
@@ -472,11 +396,7 @@ async function planStep(userText, memoryContext) {
       },
       {
         role: "user",
-        content: `ПАМЯТЬ:
-${memoryContext || "нет"}
-
-СООБЩЕНИЕ:
-${userText}`
+        content: `ПАМЯТЬ:\n${memoryContext || "нет"}\n\nСООБЩЕНИЕ:\n${userText}`
       }
     ],
     { temperature: 0.2, max_tokens: 200 }
@@ -485,24 +405,14 @@ ${userText}`
   try {
     return JSON.parse(plan);
   } catch {
-    return {
-      type: "direct",
-      needs_memory: false,
-      should_take_position: false,
-      needs_web: false
-    };
+    return { type: "direct", needs_memory: false, should_take_position: false, needs_web: false };
   }
 }
 
-// ✅ NEW minimal state updater (activeTopic/openLoop/position/summary)
+// ---------- DIALOG STATE ----------
 async function updateDialogState(userId, userText, assistantReply) {
   if (!dialogState[userId]) {
-    dialogState[userId] = {
-      activeTopic: "",
-      openLoop: "",
-      position: "",
-      summary: ""
-    };
+    dialogState[userId] = { activeTopic: "", openLoop: "", position: "", summary: "" };
   }
 
   const analysis = await openaiChat(
@@ -522,10 +432,7 @@ async function updateDialogState(userId, userText, assistantReply) {
       },
       {
         role: "user",
-        content: `
-Пользователь: ${userText}
-Ассистент: ${assistantReply}
-`
+        content: `Пользователь: ${userText}\nАссистент: ${assistantReply}`
       }
     ],
     { temperature: 0.2, max_tokens: 200 }
@@ -535,15 +442,12 @@ async function updateDialogState(userId, userText, assistantReply) {
     const start = analysis.indexOf("{");
     const end = analysis.lastIndexOf("}");
     if (start === -1 || end === -1) return;
-
-    const jsonString = analysis.slice(start, end + 1);
-    dialogState[userId] = JSON.parse(jsonString);
+    dialogState[userId] = JSON.parse(analysis.slice(start, end + 1));
   } catch (e) {
     console.error("updateDialogState parse error:", e);
   }
 }
 
-// 🔴 validateAnswer (added рядом с updateDialogState)
 async function validateAnswer(userId, draftReply) {
   const state = dialogState[userId] || {};
 
@@ -561,53 +465,34 @@ async function validateAnswer(userId, draftReply) {
 4) Есть ли абстрактные фразы без конкретики?
 
 Ответ строго JSON:
-{
-  "isWeak": true,
-  "reason": "короткое объяснение"
-}
+{"isWeak": true, "reason": "короткое объяснение"}
 или
-{
-  "isWeak": false,
-  "reason": ""
-}
+{"isWeak": false, "reason": ""}
 `
       },
       {
         role: "user",
-        content: `
-Состояние диалога:
-${JSON.stringify(state)}
-
-Ответ ассистента:
-${draftReply}
-`
+        content: `Состояние диалога:\n${JSON.stringify(state)}\n\nОтвет ассистента:\n${draftReply}`
       }
     ],
     { temperature: 0.2, max_tokens: 200 }
   );
 
-  // safe JSON parse
   try {
     const start = validation.indexOf("{");
     const end = validation.lastIndexOf("}");
     if (start === -1 || end === -1) return { isWeak: false, reason: "" };
-
-    const jsonString = validation.slice(start, end + 1);
-    const parsed = JSON.parse(jsonString);
-    return {
-      isWeak: parsed.isWeak === true,
-      reason: typeof parsed.reason === "string" ? parsed.reason : ""
-    };
+    const parsed = JSON.parse(validation.slice(start, end + 1));
+    return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
   } catch (e) {
     console.error("validateAnswer parse error:", e);
     return { isWeak: false, reason: "" };
   }
 }
 
+// ---------- GENERATE REPLY ----------
 async function generateReply(userId, userText, memory) {
-  if (!dialogHistory[userId]) {
-    dialogHistory[userId] = [];
-  }
+  if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
   const identity = await sbGetIdentity(userId);
 
@@ -617,7 +502,7 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
-  // --- ПАМЯТЬ ---
+  // --- MEMORY (vector) ---
   let memoryContext = "";
   try {
     const relevant = await sbSearchMemory(userId, userText, 5);
@@ -628,7 +513,7 @@ async function generateReply(userId, userText, memory) {
     console.error("Memory search failed:", e);
   }
 
-  // --- ИНТЕРНЕТ ---
+  // --- WEB ---
   let webContext = "";
   const plan = await planStep(userText, memoryContext);
 
@@ -638,6 +523,8 @@ async function generateReply(userId, userText, memory) {
       webContext = results.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
     }
   }
+
+  const state = dialogState[userId] || {};
 
   const systemPrompt = `
 ${KUZYA_CORE}
@@ -680,8 +567,6 @@ ${KUZYA_CORE}
 Это живой диалог.
 `;
 
-  const state = dialogState[userId] || {};
-
   const messages = [
     {
       role: "system",
@@ -699,18 +584,12 @@ ${KUZYA_CORE}
     ...dialogHistory[userId]
   ];
 
-  // 🔴 STEP 2: draft -> validate -> (optional) strengthen -> updateState -> return
-  let draftReply = await openaiChat(messages, {
-    temperature: 0.7,
-    max_tokens: 450
-  });
+  console.log("STATE BEFORE REPLY:", dialogState[userId]);
 
-  let validation = { isWeak: false, reason: "" };
-  try {
-    validation = await validateAnswer(userId, draftReply);
-  } catch (e) {
-    console.error("validateAnswer failed:", e);
-  }
+  // draft -> validate -> maybe strengthen
+  let draftReply = await openaiChat(messages, { temperature: 0.7, max_tokens: 450 });
+
+  const validation = await validateAnswer(userId, draftReply);
 
   if (validation.isWeak) {
     draftReply = await openaiChat(
@@ -734,12 +613,13 @@ ${KUZYA_CORE}
 
   dialogHistory[userId].push({ role: "assistant", content: draftReply });
 
-  // ✅ safe state update (doesn't block replying)
   try {
     await updateDialogState(userId, userText, draftReply);
   } catch (e) {
     console.error("updateDialogState failed:", e);
   }
+
+  console.log("STATE AFTER UPDATE:", dialogState[userId]);
 
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
@@ -750,14 +630,9 @@ ${KUZYA_CORE}
 
 // ---------- GENERATE VISION REPLY ----------
 async function generateVisionReply(userId, imageUrl, memory) {
-  if (!dialogHistory[userId]) {
-    dialogHistory[userId] = [];
-  }
+  if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
-  dialogHistory[userId].push({
-    role: "user",
-    content: "[Пользователь отправил фото]"
-  });
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
 
   if (dialogHistory[userId].length > 30) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
@@ -809,9 +684,7 @@ ${memoryContext || "Нет сохранённых фактов"}
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
 
-  if (!msg) {
-    return res.sendStatus(200);
-  }
+  if (!msg) return res.sendStatus(200);
 
   res.sendStatus(200);
 
@@ -820,7 +693,7 @@ app.post("/webhook", async (req, res) => {
     const { id: userId } = msg.from;
 
     try {
-      // --- PHOTO HANDLER ---
+      // PHOTO
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
@@ -831,21 +704,18 @@ app.post("/webhook", async (req, res) => {
         const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
 
         const memory = await sbGetMemory(userId);
-
         const reply = await generateVisionReply(userId, imageUrl, memory);
 
         await tgSendMessage(chatId, reply);
         return;
       }
 
-      // --- TEXT HANDLER ---
-      if (typeof msg.text !== "string") {
-        return;
-      }
+      // TEXT
+      if (typeof msg.text !== "string") return;
 
       const userText = msg.text.trim();
 
-      // 1️⃣ Сначала извлекаем и сохраняем новые факты
+      // save facts first
       const facts = await extractFacts(userText);
       console.log("Extracted facts:", facts);
 
@@ -853,10 +723,7 @@ app.post("/webhook", async (req, res) => {
         await Promise.all(facts.map(f => sbSaveFact(userId, f)));
       }
 
-      // 2️⃣ Потом получаем обновлённую память
       const memory = await sbGetMemory(userId);
-
-      // 3️⃣ Потом генерируем ответ уже на актуальной памяти
       const reply = await generateReply(userId, userText, memory);
 
       await tgSendMessage(chatId, reply);
