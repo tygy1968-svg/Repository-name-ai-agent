@@ -687,6 +687,31 @@ ${memoryContext || "Нет сохранённых фактов"}
   return reply;
 }
 
+// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
+app.post("/vapi-webhook", async (req, res) => {
+  try {
+    const body = req.body;
+
+    console.log("VAPI webhook hit");
+    console.log("VAPI headers:", {
+      "content-type": req.headers["content-type"],
+      "user-agent": req.headers["user-agent"]
+    });
+
+    const preview =
+      typeof body === "string"
+        ? body.slice(0, 2000)
+        : JSON.stringify(body).slice(0, 2000);
+
+    console.log("VAPI body preview:", preview);
+
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("VAPI webhook error:", e);
+    return res.status(200).json({ ok: true });
+  }
+});
+
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
