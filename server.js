@@ -1,7 +1,14 @@
 import express from "express";
+import twilio from "twilio";
 
 const app = express();
+
+// важно для корректного https/host на Render
+app.set("trust proxy", true);
+
 app.use(express.json());
+// Twilio обычно шлёт form-urlencoded
+app.use(express.urlencoded({ extended: false }));
 
 // ---------- ENV ----------
 const {
@@ -686,31 +693,6 @@ ${memoryContext || "Нет сохранённых фактов"}
 
   return reply;
 }
-
-// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
-app.post("/vapi-webhook", async (req, res) => {
-  try {
-    const body = req.body;
-
-    console.log("VAPI webhook hit");
-    console.log("VAPI headers:", {
-      "content-type": req.headers["content-type"],
-      "user-agent": req.headers["user-agent"]
-    });
-
-    const preview =
-      typeof body === "string"
-        ? body.slice(0, 2000)
-        : JSON.stringify(body).slice(0, 2000);
-
-    console.log("VAPI body preview:", preview);
-
-    return res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error("VAPI webhook error:", e);
-    return res.status(200).json({ ok: true });
-  }
-});
 
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
