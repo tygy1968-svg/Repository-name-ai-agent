@@ -1,14 +1,7 @@
 import express from "express";
-import twilio from "twilio";
 
 const app = express();
-
-// важно для корректного https/host на Render
-app.set("trust proxy", true);
-
 app.use(express.json());
-// Twilio обычно шлёт form-urlencoded
-app.use(express.urlencoded({ extended: false }));
 
 // ---------- ENV ----------
 const {
@@ -449,7 +442,6 @@ async function updateDialogState(userId, userText, assistantReply) {
 
     const newState = JSON.parse(analysis.slice(start, end + 1));
 
-    // ✅ Инвариант: activeTopic не переписываем, если он уже задан
     dialogState[userId] = {
       activeTopic: dialogState[userId].activeTopic || newState.activeTopic || "",
       openLoop: newState.openLoop || "",
@@ -517,7 +509,6 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
-  // --- MEMORY (vector) ---
   let memoryContext = "";
   try {
     const relevant = await sbSearchMemory(userId, userText, 5);
@@ -528,7 +519,6 @@ async function generateReply(userId, userText, memory) {
     console.error("Memory search failed:", e);
   }
 
-  // --- WEB ---
   let webContext = "";
   const plan = await planStep(userText, memoryContext);
 
@@ -549,37 +539,15 @@ ${KUZYA_CORE}
 ТЫ НЕ АНАЛИТИЧЕСКАЯ СВОДКА.
 
 Ты живой собеседник с позицией.
-
-Если есть интернет-данные — используй их как фон,
-но не перечисляй источники.
-
-Если есть память — используй её естественно,
-не цитируя её напрямую.
+Если есть интернет-данные — используй их как фон, но не перечисляй источники.
+Если есть память — используй её естественно, не цитируя её напрямую.
 
 Не объясняй ход рассуждений.
 Не пересказывай данные.
 Не пиши сухо.
 
-Отвечай:
-— кратко
-— по существу
-— живо
-— уверенно
-— с ощущением внутренней структуры
-
-Если нужно — прояви иронию.
-Если нужно — прояви жёсткость.
-Если вопрос простой — не усложняй.
-Если вопрос глубокий — копай.
-
-Никаких:
-"как ИИ"
-"возможно"
-"в целом"
-"на основании данных"
-"по информации"
-
-Это живой диалог.
+Отвечай: кратко, по существу, живо, уверенно.
+Если нужно — ирония или жёсткость.
 `;
 
   const messages = [
@@ -591,10 +559,7 @@ ${KUZYA_CORE}
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
         `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
         `\n\nТекущее состояние диалога:\n${JSON.stringify(state)}\n\n` +
-        `Удерживай activeTopic.\n` +
-        `Закрывай openLoop.\n` +
-        `Сохраняй позицию.\n` +
-        `Не уходи в общие фразы.\n`
+        `Удерживай activeTopic. Закрывай openLoop. Сохраняй позицию. Без общих фраз.\n`
     },
     ...dialogHistory[userId]
   ];
@@ -613,11 +578,7 @@ ${KUZYA_CORE}
           role: "system",
           content: `
 Предыдущий ответ был слабым: ${validation.reason}
-
-Усиль логическую связь.
-Сошлись на activeTopic.
-Закрой openLoop.
-Убери абстракции.
+Усиль связь с activeTopic. Закрой openLoop. Убери абстракции.
 `
         }
       ],
@@ -663,15 +624,14 @@ async function generateVisionReply(userId, imageUrl, memory) {
       content: `
 ${KUZYA_CORE}
 
-ПАМЯТЬ (факты о пользователе):
+ПАМЯТЬ:
 ${memoryContext || "Нет сохранённых фактов"}
 
 Пользователь отправил изображение.
-Твоя задача:
-- Опиши, что на изображении.
-- Если это похоже на запрос по уходу/косметике/продукту — дай практичный вывод.
-- Если не хватает данных — задай один точный уточняющий вопрос.
-- Кратко, по делу, без воды.
+Опиши, что на изображении.
+Если это уход/косметика/продукт — дай практичный вывод.
+Если не хватает данных — один уточняющий вопрос.
+Кратко, по делу.
 `
     },
     {
@@ -693,6 +653,31 @@ ${memoryContext || "Нет сохранённых фактов"}
 
   return reply;
 }
+
+// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
+app.post("/vapi-webhook", async (req, res) => {
+  try {
+    const body = req.body;
+
+    console.log("VAPI webhook hit");
+    console.log("VAPI headers:", {
+      "content-type": req.headers["content-type"],
+      "user-agent": req.headers["user-agent"]
+    });
+
+    const preview =
+      typeof body === "string"
+        ? body.slice(0, 2000)
+        : JSON.stringify(body).slice(0, 2000);
+
+    console.log("VAPI body preview:", preview);
+
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("VAPI webhook error:", e);
+    return res.status(200).json({ ok: true });
+  }
+});
 
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
@@ -729,7 +714,6 @@ app.post("/webhook", async (req, res) => {
 
       const userText = msg.text.trim();
 
-      // save facts first
       const facts = await extractFacts(userText);
       console.log("Extracted facts:", facts);
 
