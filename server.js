@@ -729,24 +729,13 @@ app.post("/webhook", async (req, res) => {
   })();
 });
 
-// ---------- TWILIO VOICE (TEST) ----------
-// Для Twilio (POST)
+// ---------- TWILIO VOICE ----------
 app.post("/voice", (req, res) => {
   res.type("text/xml");
   res.send(`
-<Response>
-  <Say voice="Polly.Joanna">Привет. Кузя на связи.</Say>
-</Response>
-  `);
-});
-
-// Для проверки в браузере (GET)
-app.get("/voice", (req, res) => {
-  res.type("text/xml");
-  res.send(`
-<Response>
-  <Say voice="Polly.Joanna">Voice endpoint is active.</Say>
-</Response>
+    <Response>
+      <Say>Кузя на связи.</Say>
+    </Response>
   `);
 });
 
