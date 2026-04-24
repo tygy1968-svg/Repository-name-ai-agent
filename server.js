@@ -1,11 +1,8 @@
 import express from "express";
-import twilio from "twilio";
 
 const app = express();
-
-// JSON для Telegram/Vapi
 app.use(express.json());
-// form-urlencoded для Twilio webhooks
+// Twilio часто шлёт form-urlencoded:
 app.use(express.urlencoded({ extended: false }));
 
 // ---------- ENV ----------
@@ -137,10 +134,7 @@ async function sbDeleteFactsByPattern(userId, patterns) {
       `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&content=ilike.${encoded}`,
       {
         method: "DELETE",
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
       }
     );
 
@@ -153,12 +147,7 @@ async function sbDeleteFactsByPattern(userId, patterns) {
 async function sbGetMemory(userId, limit = 15) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
-    {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
 
   if (!res.ok) return [];
@@ -168,12 +157,7 @@ async function sbGetMemory(userId, limit = 15) {
 async function sbGetIdentity(userId) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
-    {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
 
   if (!res.ok) return null;
@@ -203,10 +187,7 @@ async function sbSaveFact(userId, fact) {
       `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
       {
         method: "DELETE",
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
       }
     );
   }
@@ -294,10 +275,7 @@ async function createEmbedding(text) {
 async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "gpt-4o", temperature, max_tokens, messages })
   });
 
@@ -319,10 +297,7 @@ async function googleSearch(query) {
     return [];
   }
 
-  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(
-    query
-  )}&api_key=${key}&hl=ru&gl=ua`;
-
+  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${key}&hl=ru&gl=ua`;
   const safeUrl = url.replace(/api_key=[^&]+/i, "api_key=***");
   console.log("🔎 SERP URL:", safeUrl);
 
@@ -432,12 +407,7 @@ async function planStep(userText, memoryContext) {
   try {
     return JSON.parse(plan);
   } catch {
-    return {
-      type: "direct",
-      needs_memory: false,
-      should_take_position: false,
-      needs_web: false
-    };
+    return { type: "direct", needs_memory: false, should_take_position: false, needs_web: false };
   }
 }
 
@@ -462,10 +432,7 @@ async function updateDialogState(userId, userText, assistantReply) {
 Ответ строго в JSON.
 `
       },
-      {
-        role: "user",
-        content: `Пользователь: ${userText}\nАссистент: ${assistantReply}`
-      }
+      { role: "user", content: `Пользователь: ${userText}\nАссистент: ${assistantReply}` }
     ],
     { temperature: 0.2, max_tokens: 200 }
   );
@@ -525,10 +492,7 @@ async function validateAnswer(userId, draftReply) {
     if (start === -1 || end === -1) return { isWeak: false, reason: "" };
 
     const parsed = JSON.parse(validation.slice(start, end + 1));
-    return {
-      isWeak: parsed.isWeak === true,
-      reason: typeof parsed.reason === "string" ? parsed.reason : ""
-    };
+    return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
   } catch (e) {
     console.error("validateAnswer parse error:", e);
     return { isWeak: false, reason: "" };
@@ -547,7 +511,6 @@ async function generateReply(userId, userText, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
-  // MEMORY
   let memoryContext = "";
   try {
     const relevant = await sbSearchMemory(userId, userText, 5);
@@ -558,7 +521,6 @@ async function generateReply(userId, userText, memory) {
     console.error("Memory search failed:", e);
   }
 
-  // WEB
   let webContext = "";
   const plan = await planStep(userText, memoryContext);
 
@@ -716,7 +678,7 @@ app.post("/vapi-webhook", async (req, res) => {
   }
 });
 
-// ---------- WEBHOOK (TELEGRAM) ----------
+// ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
 
@@ -729,7 +691,6 @@ app.post("/webhook", async (req, res) => {
     const { id: userId } = msg.from;
 
     try {
-      // PHOTO
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
@@ -746,7 +707,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // TEXT
       if (typeof msg.text !== "string") return;
 
       const userText = msg.text.trim();
@@ -769,22 +729,25 @@ app.post("/webhook", async (req, res) => {
   })();
 });
 
-// ---------- TWILIO VOICE ----------
-app.post("/voice", async (req, res) => {
-  try {
-    const VoiceResponse = twilio.twiml.VoiceResponse;
-    const twiml = new VoiceResponse();
+// ---------- TWILIO VOICE (TEST) ----------
+// Для Twilio (POST)
+app.post("/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(`
+<Response>
+  <Say voice="Polly.Joanna">Привет. Кузя на связи.</Say>
+</Response>
+  `);
+});
 
-    twiml.say({ voice: "Polly.Joanna" }, "Connecting you to Kuzya.");
-    twiml.pause({ length: 2 });
-    twiml.say({ voice: "Polly.Joanna" }, "Voice channel is active.");
-
-    res.type("text/xml");
-    res.send(twiml.toString());
-  } catch (e) {
-    console.error("Voice endpoint error:", e);
-    res.sendStatus(500);
-  }
+// Для проверки в браузере (GET)
+app.get("/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(`
+<Response>
+  <Say voice="Polly.Joanna">Voice endpoint is active.</Say>
+</Response>
+  `);
 });
 
 // ---------- START ----------
