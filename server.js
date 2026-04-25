@@ -729,14 +729,16 @@ app.post("/webhook", async (req, res) => {
   })();
 });
 
-// ---------- TWILIO VOICE ----------
+// ---------- TWILIO VOICE (SAFE TWIML) ----------
 app.post("/voice", (req, res) => {
-  res.type("text/xml");
-  res.send(`
-    <Response>
-      <Say>Кузя на связи.</Say>
-    </Response>
-  `);
+  res.set("Content-Type", "text/xml");
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Amy">Кузя на связи.</Say>
+</Response>`;
+
+  res.status(200).send(twiml);
 });
 
 // ---------- START ----------
