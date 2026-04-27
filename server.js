@@ -728,9 +728,13 @@ app.post("/webhook", async (req, res) => {
 
         const vapiKey = process.env.VAPI_API_KEY;
         const assistantId = process.env.VAPI_ASSISTANT_ID;
+        const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
 
-        if (!vapiKey || !assistantId) {
-          await tgSendMessage(chatId, "❌ Не настроены ENV: VAPI_API_KEY и/или VAPI_ASSISTANT_ID");
+        if (!vapiKey || !assistantId || !phoneNumberId) {
+          await tgSendMessage(
+            chatId,
+            "❌ Не настроены ENV: VAPI_API_KEY / VAPI_ASSISTANT_ID / VAPI_PHONE_NUMBER_ID"
+          );
           return;
         }
 
@@ -743,6 +747,7 @@ app.post("/webhook", async (req, res) => {
             },
             body: JSON.stringify({
               assistantId: assistantId,
+              phoneNumberId: phoneNumberId,
               customer: { number: phoneNumber },
               metadata: { instruction }
             })
@@ -764,7 +769,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // save facts first
       const facts = await extractFacts(text);
       console.log("Extracted facts:", facts);
 
