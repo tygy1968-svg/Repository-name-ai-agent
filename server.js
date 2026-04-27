@@ -741,6 +741,44 @@ app.post("/voice", (req, res) => {
   res.status(200).send(twiml);
 });
 
+//
+// ✅✅✅ NEW: VAPI CUSTOM LLM (OpenAI-compatible)
+// Vapi будет дергать ЭТОТ endpoint, если ты включишь Custom LLM и укажешь Server URL сюда.
+//
+app.post("/chat/completions", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+
+    console.log("VAPI LLM HIT /chat/completions");
+    console.log("VAPI LLM messages count:", messages.length);
+
+    // Простая прокладка в OpenAI через твой openaiChat()
+    const assistantText = await openaiChat(messages, {
+      temperature: 0.7,
+      max_tokens: 350
+    });
+
+    // OpenAI-compatible response (не-stream)
+    return res.status(200).json({
+      id: `chatcmpl_${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: "gpt-4o",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: assistantText },
+          finish_reason: "stop"
+        }
+      ]
+    });
+  } catch (e) {
+    console.error("chat/completions error:", e);
+    return res.status(500).json({ error: "chat/completions failed" });
+  }
+});
+
 // ---------- START ----------
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
