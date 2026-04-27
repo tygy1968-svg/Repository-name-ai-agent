@@ -1,5 +1,4 @@
 import express from "express";
-import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
@@ -18,9 +17,6 @@ const {
 if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error("One or more API keys / URLs are missing in ENV variables");
 }
-
-// ✅ OpenAI client (нужен именно для openai.chat.completions.create)
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // --- TEMP ENV DEBUG ---
 console.log("SERP API:", !!process.env.SERP_API_KEY);
@@ -256,7 +252,7 @@ async function sbSearchMemory(userId, queryText, k = 5) {
   return res.json();
 }
 
-// ---------- OPENAI (FETCH STYLE, for other parts) ----------
+// ---------- OPENAI ----------
 async function createEmbedding(text) {
   const res = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
@@ -657,7 +653,7 @@ ${memoryContext || "Нет сохранённых фактов"}
   return reply;
 }
 
-// ---------- VAPI WEBHOOK ----------
+// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
 app.post("/vapi-webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -675,39 +671,10 @@ app.post("/vapi-webhook", async (req, res) => {
 
     console.log("VAPI body preview:", preview);
 
-    // ✅ БЛОК ИЗ ТВОЕГО СООБЩЕНИЯ
-    const message = req.body?.message;
-
-    if (message?.type === "conversation-update") {
-      const conversation = message.conversation || [];
-
-      const lastUserMessage = conversation
-        .filter(m => m.role === "user")
-        .pop();
-
-      if (!lastUserMessage) {
-        return res.json({});
-      }
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: conversation.map(m => ({
-          role: m.role,
-          content: m.content
-        }))
-      });
-
-      const reply = completion.choices[0].message.content;
-
-      return res.json({
-        outputSpeech: reply
-      });
-    }
-
-    return res.json({});
+    return res.status(200).json({ ok: true });
   } catch (e) {
     console.error("VAPI webhook error:", e);
-    return res.status(200).json({});
+    return res.status(200).json({ ok: true });
   }
 });
 
@@ -717,6 +684,7 @@ app.post("/webhook", async (req, res) => {
 
   if (!msg) return res.sendStatus(200);
 
+  // отвечаем Telegram сразу
   res.sendStatus(200);
 
   (async () => {
@@ -724,6 +692,7 @@ app.post("/webhook", async (req, res) => {
     const { id: userId } = msg.from;
 
     try {
+      // PHOTO
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
@@ -740,11 +709,63 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      // TEXT
       if (typeof msg.text !== "string") return;
 
-      const userText = msg.text.trim();
+      const text = msg.text.trim();
 
-      const facts = await extractFacts(userText);
+      // --- CALL COMMAND ---
+      if (text.startsWith("/call")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(chatId, "Используй: /call +380XXXXXXXXX текст");
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction = parts.slice(2).join(" ");
+
+        const vapiKey = process.env.VAPI_API_KEY;
+        const assistantId = process.env.VAPI_ASSISTANT_ID;
+
+        if (!vapiKey || !assistantId) {
+          await tgSendMessage(chatId, "❌ Не настроены ENV: VAPI_API_KEY и/или VAPI_ASSISTANT_ID");
+          return;
+        }
+
+        try {
+          const response = await fetch("https://api.vapi.ai/call", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${vapiKey}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              assistantId: assistantId,
+              customer: { number: phoneNumber },
+              metadata: { instruction }
+            })
+          });
+
+          if (!response.ok) {
+            const errText = await response.text();
+            console.error("Vapi call error:", response.status, errText);
+            await tgSendMessage(chatId, "❌ Ошибка создания звонка (см. логи Render)");
+            return;
+          }
+
+          await tgSendMessage(chatId, "📞 Звонок создан");
+        } catch (err) {
+          console.error("Vapi call exception:", err);
+          await tgSendMessage(chatId, "❌ Ошибка создания звонка");
+        }
+
+        return;
+      }
+
+      // save facts first
+      const facts = await extractFacts(text);
       console.log("Extracted facts:", facts);
 
       if (facts.length > 0) {
@@ -752,7 +773,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       const memory = await sbGetMemory(userId);
-      const reply = await generateReply(userId, userText, memory);
+      const reply = await generateReply(userId, text, memory);
 
       await tgSendMessage(chatId, reply);
     } catch (e) {
