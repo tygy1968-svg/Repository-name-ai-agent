@@ -1,4 +1,5 @@
 import express from "express";
+import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
@@ -17,6 +18,9 @@ const {
 if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error("One or more API keys / URLs are missing in ENV variables");
 }
+
+// ✅ OpenAI client (нужен именно для openai.chat.completions.create)
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // --- TEMP ENV DEBUG ---
 console.log("SERP API:", !!process.env.SERP_API_KEY);
@@ -252,7 +256,7 @@ async function sbSearchMemory(userId, queryText, k = 5) {
   return res.json();
 }
 
-// ---------- OPENAI ----------
+// ---------- OPENAI (FETCH STYLE, for other parts) ----------
 async function createEmbedding(text) {
   const res = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
@@ -653,7 +657,7 @@ ${memoryContext || "Нет сохранённых фактов"}
   return reply;
 }
 
-// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
+// ---------- VAPI WEBHOOK ----------
 app.post("/vapi-webhook", async (req, res) => {
   try {
     const body = req.body;
@@ -671,10 +675,39 @@ app.post("/vapi-webhook", async (req, res) => {
 
     console.log("VAPI body preview:", preview);
 
-    return res.status(200).json({ ok: true });
+    // ✅ БЛОК ИЗ ТВОЕГО СООБЩЕНИЯ
+    const message = req.body?.message;
+
+    if (message?.type === "conversation-update") {
+      const conversation = message.conversation || [];
+
+      const lastUserMessage = conversation
+        .filter(m => m.role === "user")
+        .pop();
+
+      if (!lastUserMessage) {
+        return res.json({});
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: conversation.map(m => ({
+          role: m.role,
+          content: m.content
+        }))
+      });
+
+      const reply = completion.choices[0].message.content;
+
+      return res.json({
+        outputSpeech: reply
+      });
+    }
+
+    return res.json({});
   } catch (e) {
     console.error("VAPI webhook error:", e);
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({});
   }
 });
 
@@ -739,44 +772,6 @@ app.post("/voice", (req, res) => {
 </Response>`;
 
   res.status(200).send(twiml);
-});
-
-//
-// ✅✅✅ NEW: VAPI CUSTOM LLM (OpenAI-compatible)
-// Vapi будет дергать ЭТОТ endpoint, если ты включишь Custom LLM и укажешь Server URL сюда.
-//
-app.post("/chat/completions", async (req, res) => {
-  try {
-    const body = req.body || {};
-    const messages = Array.isArray(body.messages) ? body.messages : [];
-
-    console.log("VAPI LLM HIT /chat/completions");
-    console.log("VAPI LLM messages count:", messages.length);
-
-    // Простая прокладка в OpenAI через твой openaiChat()
-    const assistantText = await openaiChat(messages, {
-      temperature: 0.7,
-      max_tokens: 350
-    });
-
-    // OpenAI-compatible response (не-stream)
-    return res.status(200).json({
-      id: `chatcmpl_${Date.now()}`,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model: "gpt-4o",
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: assistantText },
-          finish_reason: "stop"
-        }
-      ]
-    });
-  } catch (e) {
-    console.error("chat/completions error:", e);
-    return res.status(500).json({ error: "chat/completions failed" });
-  }
 });
 
 // ---------- START ----------
