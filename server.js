@@ -392,7 +392,7 @@ ${memoryContext || "нет"}
   return reply || "Я на связи. Повтори, пожалуйста, я не расслышал.";
 }
 
-app.post("/vapi-chat/completions", async (req, res) => {
+app.post("/vapi-chat/chat/completions", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
