@@ -749,7 +749,18 @@ app.post("/webhook", async (req, res) => {
               assistantId: assistantId,
               phoneNumberId: phoneNumberId,
               customer: { number: phoneNumber },
-              metadata: { instruction }
+
+              // Для логов Vapi
+              metadata: {
+                instruction
+              },
+
+              // Для мозга ассистента
+              assistantOverrides: {
+                variableValues: {
+                  instruction
+                }
+              }
             })
           });
 
