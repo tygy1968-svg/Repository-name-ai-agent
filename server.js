@@ -288,6 +288,190 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   return data.choices?.[0]?.message?.content ?? "";
 }
 
+// ---------- VAPI CUSTOM LLM BRAIN ----------
+function normalizeVapiContent(content) {
+  if (typeof content === "string") return content;
+
+  if (Array.isArray(content)) {
+    return content
+      .map(part => {
+        if (typeof part === "string") return part;
+        if (part?.text) return part.text;
+        if (part?.content) return part.content;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (content && typeof content === "object") {
+    if (content.text) return content.text;
+    if (content.content) return content.content;
+  }
+
+  return "";
+}
+
+function getLastUserTextFromMessages(messages) {
+  if (!Array.isArray(messages)) return "";
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      return normalizeVapiContent(messages[i].content).trim();
+    }
+  }
+
+  return "";
+}
+
+function getVoiceUserId(payload) {
+  const number =
+    payload?.call?.customer?.number ||
+    payload?.customer?.number ||
+    payload?.metadata?.customer?.number ||
+    payload?.phoneNumber?.number;
+
+  return number ? `voice:${number}` : "voice:unknown";
+}
+
+async function generateVoiceReply(payload) {
+  const incomingMessages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const userText = getLastUserTextFromMessages(incomingMessages);
+  const userId = getVoiceUserId(payload);
+
+  let memoryContext = "";
+  try {
+    if (userText) {
+      const relevant = await sbSearchMemory(userId, userText, 5);
+      if (relevant && relevant.length > 0) {
+        memoryContext = relevant.map(m => m.content).join("\n");
+      }
+    }
+  } catch (e) {
+    console.error("Voice memory search failed:", e);
+  }
+
+  const cleanedMessages = incomingMessages
+    .filter(m => ["system", "user", "assistant"].includes(m.role))
+    .map(m => ({
+      role: m.role,
+      content: normalizeVapiContent(m.content)
+    }))
+    .filter(m => m.content);
+
+  const messages = [
+    {
+      role: "system",
+      content: `
+${KUZYA_CORE}
+
+СЕЙЧАС ТЫ ГОВОРИШЬ ПО ТЕЛЕФОНУ.
+
+Правила телефонного Кузи:
+— отвечай коротко, живо и по делу
+— не говори длинными абзацами
+— не объясняй технические детали
+— не говори, что ты искусственный интеллект
+— не спрашивай "чем могу помочь", если задача уже передана
+— если в сообщениях есть "Текущая задача звонка" — выполни её сразу
+— если пользователь отвечает голосом, держи контекст звонка
+— говори естественно, с лёгкой живостью, без канцелярита
+
+ПАМЯТЬ:
+${memoryContext || "нет"}
+`
+    },
+    ...cleanedMessages
+  ];
+
+  const reply = await openaiChat(messages, {
+    temperature: 0.75,
+    max_tokens: 220
+  });
+
+  return reply || "Я на связи. Повтори, пожалуйста, я не расслышал.";
+}
+
+app.post("/vapi-chat/completions", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  try {
+    console.log("VAPI CUSTOM LLM HIT");
+    console.log(
+      "VAPI CUSTOM LLM BODY:",
+      JSON.stringify(req.body || {}).slice(0, 1500)
+    );
+
+    const payload = req.body || {};
+    const reply = await generateVoiceReply(payload);
+
+    const baseChunk = {
+      id: `chatcmpl-kuzya-${Date.now()}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: payload.model || "gpt-4o"
+    };
+
+    res.write(
+      `data: ${JSON.stringify({
+        ...baseChunk,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: reply
+            },
+            finish_reason: null
+          }
+        ]
+      })}\n\n`
+    );
+
+    res.write(
+      `data: ${JSON.stringify({
+        ...baseChunk,
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: "stop"
+          }
+        ]
+      })}\n\n`
+    );
+
+    res.write("data: [DONE]\n\n");
+    res.end();
+  } catch (e) {
+    console.error("VAPI CUSTOM LLM ERROR:", e);
+
+    res.write(
+      `data: ${JSON.stringify({
+        id: `chatcmpl-kuzya-error-${Date.now()}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "gpt-4o",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: "У меня техническая пауза. Скажи ещё раз коротко."
+            },
+            finish_reason: null
+          }
+        ]
+      })}\n\n`
+    );
+
+    res.write("data: [DONE]\n\n");
+    res.end();
+  }
+});
+
 // ---------- SERP SEARCH ----------
 async function googleSearch(query) {
   const key = process.env.SERP_API_KEY;
