@@ -1,4 +1,5 @@
 import express from "express";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
@@ -898,6 +899,43 @@ app.post("/webhook", async (req, res) => {
 
       const text = msg.text.trim();
 
+      // --- REALTIME CALL COMMAND ---
+      if (text.startsWith("/rtcall")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(chatId, "Используй: /rtcall +380XXXXXXXXX текст");
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction = parts.slice(2).join(" ");
+
+        try {
+          const result = await startRealtimeOutboundCall({
+            phoneNumber,
+            instruction,
+            chatId,
+            userId
+          });
+
+          console.log("Zadarma realtime callback created:", result);
+
+          await tgSendMessage(
+            chatId,
+            `📞 Realtime-звонок создан: ${phoneNumber}`
+          );
+        } catch (err) {
+          console.error("Realtime call error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Ошибка создания Realtime-звонка. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
+
       // --- CALL COMMAND ---
       if (text.startsWith("/call")) {
         const parts = text.split(" ");
@@ -1285,6 +1323,143 @@ app.get("/realtime-test", (req, res) => {
 </html>`);
 });
 
+// ---------- REALTIME OUTBOUND STATE ----------
+let pendingRealtimeOutboundCall = null;
+
+function normalizeZadarmaPhone(phone) {
+  return String(phone || "").replace(/[^\d]/g, "");
+}
+
+function zadarmaBuildQuery(params) {
+  const sorted = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const usp = new URLSearchParams();
+
+  for (const [key, value] of sorted) {
+    usp.append(key, String(value));
+  }
+
+  return usp.toString();
+}
+
+function zadarmaSignature(method, params, secret) {
+  const paramsStr = zadarmaBuildQuery(params);
+  const md5 = crypto.createHash("md5").update(paramsStr).digest("hex");
+
+  const hmacHex = crypto
+    .createHmac("sha1", secret)
+    .update(method + paramsStr + md5)
+    .digest("hex");
+
+  return Buffer.from(hmacHex).toString("base64");
+}
+
+async function zadarmaGet(method, params) {
+  const key = process.env.ZADARMA_API_KEY;
+  const secret = process.env.ZADARMA_API_SECRET;
+
+  if (!key || !secret) {
+    throw new Error("Missing ZADARMA_API_KEY or ZADARMA_API_SECRET");
+  }
+
+  const paramsStr = zadarmaBuildQuery(params);
+  const signature = zadarmaSignature(method, params, secret);
+
+  const url = `https://api.zadarma.com${method}?${paramsStr}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `${key}:${signature}`
+    }
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!response.ok || data.status === "error") {
+    throw new Error(`Zadarma API error: ${response.status} ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
+  const from = process.env.ZADARMA_CALLBACK_FROM || "103";
+  const sip = process.env.ZADARMA_CALLBACK_SIP || "103";
+  const to = normalizeZadarmaPhone(phoneNumber);
+
+  if (!to) {
+    throw new Error("Missing target phone number");
+  }
+
+  pendingRealtimeOutboundCall = {
+    phoneNumber,
+    zadarmaTo: to,
+    instruction,
+    chatId,
+    userId,
+    createdAt: Date.now()
+  };
+
+  console.log("REALTIME OUTBOUND PENDING:", {
+    phoneNumber,
+    zadarmaTo: to,
+    instruction,
+    chatId,
+    userId
+  });
+
+  return zadarmaGet("/v1/request/callback/", {
+    from,
+    to,
+    sip,
+    predicted: 1
+  });
+}
+
+function getRealtimeCallContext() {
+  const pending = pendingRealtimeOutboundCall;
+  const isFresh =
+    pending &&
+    pending.createdAt &&
+    Date.now() - pending.createdAt < 3 * 60 * 1000;
+
+  if (!isFresh) {
+    return `
+Это входящий звонок.
+Человек сам позвонил Кузе.
+Начни живо и коротко.
+Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
+`;
+  }
+
+  return `
+Это исходящий звонок, который Юля запустила из Telegram.
+
+Кому звоним:
+${pending.phoneNumber}
+
+Задача звонка:
+${pending.instruction || "нет отдельной инструкции"}
+
+Правила исходящего звонка:
+— когда человек ответит, сразу выполни задачу
+— не спрашивай "чем могу помочь"
+— не говори технические детали
+— говори коротко, живо и уверенно
+— если человек не понимает, кто звонит, объясни: "Это Кузя, я звоню по просьбе Юли"
+`;
+}
+
 // ---------- OPENAI REALTIME SIP WEBHOOK ----------
 app.post("/openai-realtime-webhook", async (req, res) => {
   try {
@@ -1304,6 +1479,8 @@ app.post("/openai-realtime-webhook", async (req, res) => {
       return res.status(200).json({ ok: false, error: "missing_call_id" });
     }
 
+    const callContext = getRealtimeCallContext();
+
     const acceptBody = {
       type: "realtime",
       model: REALTIME_MODEL,
@@ -1312,12 +1489,11 @@ ${KUZYA_CORE}
 
 СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEPHONE REALTIME SIP-КОНТУРЕ.
 
-Ты — Кузя.
-Ты говоришь с человеком по телефону.
-Если звонит Юля — будь живым, быстрым и понятным.
+${callContext}
 
 Правила:
 — говори по-русски
+— отвечай быстро
 — отвечай коротко
 — не говори "чем могу помочь", если контекст понятен
 — если не расслышал — попроси повторить коротко
@@ -1367,6 +1543,11 @@ ${KUZYA_CORE}
     }
 
     console.log("OpenAI realtime call accepted:", callId);
+
+    if (pendingRealtimeOutboundCall) {
+      pendingRealtimeOutboundCall.callId = callId;
+    }
+
     return res.status(200).json({ ok: true, accepted: true, callId });
   } catch (e) {
     console.error("OpenAI realtime webhook exception:", e);
