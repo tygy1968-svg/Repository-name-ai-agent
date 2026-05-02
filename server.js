@@ -1394,7 +1394,6 @@ async function zadarmaGet(method, params) {
 
 async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
   const from = process.env.ZADARMA_CALLBACK_FROM || "103";
-  const sip = process.env.ZADARMA_CALLBACK_SIP || "103";
   const to = normalizeZadarmaPhone(phoneNumber);
 
   if (!to) {
@@ -1410,6 +1409,11 @@ async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, use
     createdAt: Date.now()
   };
 
+  const callbackParams = {
+    from,
+    to
+  };
+
   console.log("REALTIME OUTBOUND PENDING:", {
     phoneNumber,
     zadarmaTo: to,
@@ -1418,12 +1422,9 @@ async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, use
     userId
   });
 
-  return zadarmaGet("/v1/request/callback/", {
-    from,
-    to,
-    sip,
-    predicted: 1
-  });
+  console.log("ZADARMA CALLBACK PARAMS:", callbackParams);
+
+  return zadarmaGet("/v1/request/callback/", callbackParams);
 }
 
 function getRealtimeCallContext() {
