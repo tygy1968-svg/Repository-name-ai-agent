@@ -994,6 +994,297 @@ app.post("/voice", (req, res) => {
   res.status(200).send(twiml);
 });
 
+// ---------- OPENAI REALTIME SANDBOX ----------
+const REALTIME_MODEL = "gpt-realtime";
+const REALTIME_VOICE = "marin";
+
+const REALTIME_KUZYA_INSTRUCTIONS = `
+${KUZYA_CORE}
+
+СЕЙЧАС ТЫ РАБОТАЕШЬ В REALTIME-ТЕСТЕ ГОЛОСА.
+
+Ты говоришь с Юлей.
+Это тест нового живого голосового контура без Vapi.
+Твоя задача — быть быстрым, живым и понятным.
+
+Правила:
+— говори по-русски
+— отвечай коротко
+— не говори "чем могу помочь", если контекст понятен
+— не объясняй технические детали без просьбы
+— если Юля проверяет скорость — отвечай сразу и по делу
+— если не расслышал — коротко попроси повторить
+— стиль: живой, уверенный, тёплый, не канцелярский
+`;
+
+app.post(
+  "/realtime/session",
+  express.text({ type: ["application/sdp", "text/plain", "*/*"] }),
+  async (req, res) => {
+    try {
+      const offerSdp = req.body;
+
+      if (!offerSdp || typeof offerSdp !== "string") {
+        return res.status(400).send("Missing SDP offer");
+      }
+
+      const sessionConfig = JSON.stringify({
+        type: "realtime",
+        model: REALTIME_MODEL,
+        instructions: REALTIME_KUZYA_INSTRUCTIONS,
+        audio: {
+          output: {
+            voice: REALTIME_VOICE
+          },
+          input: {
+            transcription: {
+              model: "gpt-4o-transcribe",
+              language: "ru"
+            },
+            turn_detection: {
+              type: "server_vad"
+            },
+            noise_reduction: {
+              type: "near_field"
+            }
+          }
+        }
+      });
+
+      const fd = new FormData();
+      fd.set("sdp", offerSdp);
+      fd.set("session", sessionConfig);
+
+      const openaiRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`
+        },
+        body: fd
+      });
+
+      const answerSdp = await openaiRes.text();
+
+      if (!openaiRes.ok) {
+        console.error("Realtime session error:", openaiRes.status, answerSdp);
+        return res.status(openaiRes.status).send(answerSdp);
+      }
+
+      res.set("Content-Type", "application/sdp");
+      return res.status(200).send(answerSdp);
+    } catch (e) {
+      console.error("Realtime session exception:", e);
+      return res.status(500).send("Realtime session failed");
+    }
+  }
+);
+
+app.get("/realtime-test", (req, res) => {
+  res.set("Content-Type", "text/html; charset=utf-8");
+
+  res.send(`<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kuzya Realtime Test</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111;
+      color: #f5f5f5;
+      padding: 24px;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    p { color: #cfcfcf; line-height: 1.45; }
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 14px 18px;
+      margin: 8px 8px 8px 0;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    #start { background: #fff; color: #111; }
+    #stop { background: #333; color: #fff; }
+    #status {
+      margin-top: 18px;
+      padding: 14px;
+      border-radius: 14px;
+      background: #1d1d1d;
+      color: #d7d7d7;
+      white-space: pre-wrap;
+      min-height: 80px;
+    }
+    .hint {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 12px;
+      border-radius: 14px;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Кузя Realtime Test</h1>
+  <p>Это тест нового голосового контура без Vapi и без Zadarma. Нажми Start, разреши микрофон и говори.</p>
+
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div class="hint">
+    Для проверки скажи: <b>Кузя, ты меня слышишь? Ответь быстро.</b>
+  </div>
+
+  <div id="status">Статус: готов.</div>
+
+  <script>
+    let pc = null;
+    let dc = null;
+    let localStream = null;
+    let remoteAudio = null;
+
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+
+    function log(msg) {
+      statusEl.textContent += "\\n" + msg;
+      statusEl.scrollTop = statusEl.scrollHeight;
+    }
+
+    async function startRealtime() {
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusEl.textContent = "Статус: запускаю...";
+
+      try {
+        pc = new RTCPeerConnection();
+
+        remoteAudio = document.createElement("audio");
+        remoteAudio.autoplay = true;
+        document.body.appendChild(remoteAudio);
+
+        pc.ontrack = (event) => {
+          log("Получен голос Кузи.");
+          remoteAudio.srcObject = event.streams[0];
+        };
+
+        pc.onconnectionstatechange = () => {
+          log("WebRTC: " + pc.connectionState);
+        };
+
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
+        });
+
+        dc = pc.createDataChannel("oai-events");
+
+        dc.onopen = () => {
+          log("Data channel открыт.");
+
+          dc.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              instructions: "Поздоровайся с Юлей одной короткой живой фразой и скажи, что realtime-контур запущен."
+            }
+          }));
+        };
+
+        dc.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "response.audio_transcript.done") {
+              log("Кузя текстом: " + data.transcript);
+            }
+
+            if (data.type === "conversation.item.input_audio_transcription.completed") {
+              log("Юля распознано: " + data.transcript);
+            }
+
+            if (data.type === "error") {
+              log("Ошибка Realtime: " + JSON.stringify(data.error || data));
+            }
+          } catch {
+            log("Event: " + event.data);
+          }
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        log("Отправляю SDP на Render...");
+
+        const sdpResponse = await fetch("/realtime/session", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/sdp"
+          },
+          body: offer.sdp
+        });
+
+        const answerText = await sdpResponse.text();
+
+        if (!sdpResponse.ok) {
+          throw new Error(answerText);
+        }
+
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: answerText
+        });
+
+        log("Соединение создано. Говори.");
+      } catch (err) {
+        log("Ошибка запуска: " + (err?.message || String(err)));
+        stopRealtime();
+      }
+    }
+
+    function stopRealtime() {
+      if (dc) {
+        try { dc.close(); } catch {}
+        dc = null;
+      }
+
+      if (pc) {
+        try { pc.close(); } catch {}
+        pc = null;
+      }
+
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+        localStream = null;
+      }
+
+      if (remoteAudio) {
+        try { remoteAudio.remove(); } catch {}
+        remoteAudio = null;
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      log("Остановлено.");
+    }
+
+    startBtn.onclick = startRealtime;
+    stopBtn.onclick = stopRealtime;
+  </script>
+</body>
+</html>`);
+});
+
 // ---------- START ----------
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
