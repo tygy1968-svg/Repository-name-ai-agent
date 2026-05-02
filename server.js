@@ -1285,6 +1285,95 @@ app.get("/realtime-test", (req, res) => {
 </html>`);
 });
 
+// ---------- OPENAI REALTIME SIP WEBHOOK ----------
+app.post("/openai-realtime-webhook", async (req, res) => {
+  try {
+    const event = req.body;
+
+    console.log("OPENAI REALTIME WEBHOOK HIT");
+    console.log("OPENAI REALTIME EVENT:", JSON.stringify(event || {}).slice(0, 2000));
+
+    if (event?.type !== "realtime.call.incoming") {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const callId = event?.data?.call_id;
+
+    if (!callId) {
+      console.error("OpenAI realtime webhook: missing call_id");
+      return res.status(200).json({ ok: false, error: "missing_call_id" });
+    }
+
+    const acceptBody = {
+      type: "realtime",
+      model: REALTIME_MODEL,
+      instructions: `
+${KUZYA_CORE}
+
+СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEPHONE REALTIME SIP-КОНТУРЕ.
+
+Ты — Кузя.
+Ты говоришь с человеком по телефону.
+Если звонит Юля — будь живым, быстрым и понятным.
+
+Правила:
+— говори по-русски
+— отвечай коротко
+— не говори "чем могу помочь", если контекст понятен
+— если не расслышал — попроси повторить коротко
+— не объясняй технические детали без просьбы
+— стиль: живой, уверенный, тёплый, не канцелярский
+      `,
+      audio: {
+        output: {
+          voice: REALTIME_VOICE
+        },
+        input: {
+          transcription: {
+            model: "gpt-4o-transcribe",
+            language: "ru"
+          },
+          turn_detection: {
+            type: "server_vad"
+          },
+          noise_reduction: {
+            type: "near_field"
+          }
+        }
+      }
+    };
+
+    const acceptRes = await fetch(
+      `https://api.openai.com/v1/realtime/calls/${callId}/accept`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(acceptBody)
+      }
+    );
+
+    const acceptText = await acceptRes.text();
+
+    if (!acceptRes.ok) {
+      console.error("OpenAI realtime accept error:", acceptRes.status, acceptText);
+      return res.status(200).json({
+        ok: false,
+        accept_status: acceptRes.status,
+        accept_error: acceptText
+      });
+    }
+
+    console.log("OpenAI realtime call accepted:", callId);
+    return res.status(200).json({ ok: true, accepted: true, callId });
+  } catch (e) {
+    console.error("OpenAI realtime webhook exception:", e);
+    return res.status(200).json({ ok: false, error: "exception" });
+  }
+});
+
 // ---------- START ----------
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
