@@ -899,6 +899,53 @@ app.post("/webhook", async (req, res) => {
 
       const text = msg.text.trim();
 
+      // --- ZADARMA RAW CALLBACK TEST ---
+      if (text.startsWith("/ztest")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(
+            chatId,
+            "Используй: /ztest FROM +380XXXXXXXXX\nНапример: /ztest 100 +380503832848"
+          );
+          return;
+        }
+
+        const from = parts[1];
+        const to = normalizeZadarmaPhone(parts[2]);
+
+        if (!from || !to) {
+          await tgSendMessage(chatId, "❌ Не хватает from или номера телефона");
+          return;
+        }
+
+        try {
+          const params = {
+            from,
+            to
+          };
+
+          console.log("ZADARMA RAW CALLBACK TEST PARAMS:", params);
+
+          const result = await zadarmaGet("/v1/request/callback/", params);
+
+          console.log("ZADARMA RAW CALLBACK TEST RESULT:", result);
+
+          await tgSendMessage(
+            chatId,
+            `✅ Zadarma test callback создан\nfrom: ${from}\nto: ${to}`
+          );
+        } catch (err) {
+          console.error("Zadarma raw callback test error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Zadarma test callback ошибка. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
+
       // --- REALTIME CALL COMMAND ---
       if (text.startsWith("/rtcall")) {
         const parts = text.split(" ");
