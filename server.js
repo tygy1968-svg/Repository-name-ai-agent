@@ -1441,7 +1441,7 @@ async function zadarmaGet(method, params) {
 
 async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
   const humanPhone = normalizeZadarmaPhone(phoneNumber);
-  const kuzyaTarget = process.env.ZADARMA_CALLBACK_TO || "103";
+  const kuzyaTarget = process.env.ZADARMA_CALLBACK_TO || "0-11";
 
   if (!humanPhone) {
     throw new Error("Missing target phone number");
