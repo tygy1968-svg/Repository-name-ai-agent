@@ -1393,12 +1393,8 @@ async function zadarmaGet(method, params) {
 }
 
 async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
-  const from = process.env.ZADARMA_CALLBACK_FROM;
+  const from = process.env.ZADARMA_CALLBACK_FROM || "103";
   const to = normalizeZadarmaPhone(phoneNumber);
-
-  if (!from) {
-    throw new Error("Missing ZADARMA_CALLBACK_FROM");
-  }
 
   if (!to) {
     throw new Error("Missing target phone number");
