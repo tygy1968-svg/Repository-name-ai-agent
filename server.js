@@ -1378,7 +1378,13 @@ app.get("/realtime-test", (req, res) => {
 let pendingRealtimeOutboundCall = null;
 
 function normalizeZadarmaPhone(phone) {
-  return String(phone || "").replace(/[^\d]/g, "");
+  const raw = String(phone || "").trim();
+
+  if (raw.startsWith("+")) {
+    return "+" + raw.slice(1).replace(/[^\d]/g, "");
+  }
+
+  return raw.replace(/[^\d]/g, "");
 }
 
 function zadarmaBuildQuery(params) {
