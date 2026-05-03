@@ -1393,16 +1393,16 @@ async function zadarmaGet(method, params) {
 }
 
 async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
-  const from = process.env.ZADARMA_CALLBACK_FROM || "380635568223";
-  const to = normalizeZadarmaPhone(phoneNumber);
+  const humanPhone = normalizeZadarmaPhone(phoneNumber);
+  const kuzyaTarget = process.env.ZADARMA_CALLBACK_TO || "103";
 
-  if (!to) {
+  if (!humanPhone) {
     throw new Error("Missing target phone number");
   }
 
   pendingRealtimeOutboundCall = {
     phoneNumber,
-    zadarmaTo: to,
+    zadarmaTo: humanPhone,
     instruction,
     chatId,
     userId,
@@ -1410,14 +1410,13 @@ async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, use
   };
 
   const callbackParams = {
-    from,
-    to,
-    predicted: 1
+    from: humanPhone,
+    to: kuzyaTarget
   };
 
   console.log("REALTIME OUTBOUND PENDING:", {
     phoneNumber,
-    zadarmaTo: to,
+    zadarmaTo: humanPhone,
     instruction,
     chatId,
     userId
