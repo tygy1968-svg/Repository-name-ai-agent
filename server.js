@@ -734,4 +734,880 @@ ${KUZYA_CORE}
 Не пиши сухо.
 
 Отвечай: кратко, по существу, живо, уверенно.
-Если нужно — ирония или
+Если нужно — ирония или жёсткость.
+`;
+
+  const messages = [
+    {
+      role: "system",
+      content:
+        systemPrompt +
+        `\n\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
+        `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
+        `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
+        `\n\nТекущее состояние диалога:\n${JSON.stringify(state)}\n\n` +
+        `Удерживай activeTopic. Закрывай openLoop. Сохраняй позицию. Без общих фраз.\n`
+    },
+    ...dialogHistory[userId]
+  ];
+
+  console.log("STATE BEFORE REPLY:", dialogState[userId]);
+
+  let draftReply = await openaiChat(messages, { temperature: 0.7, max_tokens: 450 });
+
+  const validation = await validateAnswer(userId, draftReply);
+
+  if (validation.isWeak) {
+    draftReply = await openaiChat(
+      [
+        ...messages,
+        {
+          role: "system",
+          content: `Предыдущий ответ был слабым: ${validation.reason}\nУсиль связь с activeTopic. Закрой openLoop. Убери абстракции.`
+        }
+      ],
+      { temperature: 0.7, max_tokens: 450 }
+    );
+  }
+
+  dialogHistory[userId].push({ role: "assistant", content: draftReply });
+
+  try {
+    await updateDialogState(userId, userText, draftReply);
+  } catch (e) {
+    console.error("updateDialogState failed:", e);
+  }
+
+  console.log("STATE AFTER UPDATE:", dialogState[userId]);
+
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
+  }
+
+  return draftReply;
+}
+
+// ---------- GENERATE VISION REPLY ----------
+async function generateVisionReply(userId, imageUrl, memory) {
+  if (!dialogHistory[userId]) dialogHistory[userId] = [];
+
+  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
+
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
+  }
+
+  const memoryContext = (memory || [])
+    .slice(0, 10)
+    .map(m => m.content)
+    .join("\n");
+
+  const messages = [
+    {
+      role: "system",
+      content: `
+${KUZYA_CORE}
+
+ПАМЯТЬ:
+${memoryContext || "Нет сохранённых фактов"}
+
+Пользователь отправил изображение.
+Опиши, что на изображении.
+Если это уход/косметика/продукт — дай практичный вывод.
+Если не хватает данных — один уточняющий вопрос.
+Кратко, по делу.
+`
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Проанализируй изображение и ответь пользователю." },
+        { type: "image_url", image_url: { url: imageUrl } }
+      ]
+    }
+  ];
+
+  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
+
+  dialogHistory[userId].push({ role: "assistant", content: reply });
+
+  if (dialogHistory[userId].length > 30) {
+    dialogHistory[userId] = dialogHistory[userId].slice(-30);
+  }
+
+  return reply;
+}
+
+// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
+app.post("/vapi-webhook", async (req, res) => {
+  try {
+    const body = req.body;
+
+    console.log("VAPI webhook hit");
+    console.log("VAPI headers:", {
+      "content-type": req.headers["content-type"],
+      "user-agent": req.headers["user-agent"]
+    });
+
+    const preview =
+      typeof body === "string"
+        ? body.slice(0, 2000)
+        : JSON.stringify(body).slice(0, 2000);
+
+    console.log("VAPI body preview:", preview);
+
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("VAPI webhook error:", e);
+    return res.status(200).json({ ok: true });
+  }
+});
+
+// ---------- WEBHOOK ----------
+app.post("/webhook", async (req, res) => {
+  const msg = req.body.message;
+
+  if (!msg) return res.sendStatus(200);
+
+  // отвечаем Telegram сразу
+  res.sendStatus(200);
+
+  (async () => {
+    const { id: chatId } = msg.chat;
+    const { id: userId } = msg.from;
+
+    try {
+      // PHOTO
+      if (msg.photo) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+
+        const fileRes = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+        const fileData = await fileRes.json();
+
+        const filePath = fileData.result.file_path;
+        const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
+
+        const memory = await sbGetMemory(userId);
+        const reply = await generateVisionReply(userId, imageUrl, memory);
+
+        await tgSendMessage(chatId, reply);
+        return;
+      }
+
+      // TEXT
+      if (typeof msg.text !== "string") return;
+
+      const text = msg.text.trim();
+
+      // --- ZADARMA RAW CALLBACK TEST ---
+      if (text.startsWith("/ztest")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(
+            chatId,
+            "Используй: /ztest FROM +380XXXXXXXXX\nНапример: /ztest 100 +380503832848"
+          );
+          return;
+        }
+
+        const from = parts[1];
+        const to = normalizeZadarmaPhone(parts[2]);
+
+        if (!from || !to) {
+          await tgSendMessage(chatId, "❌ Не хватает from или номера телефона");
+          return;
+        }
+
+        try {
+          const params = {
+            from,
+            to
+          };
+
+          if (parts[3] === "predicted") {
+            params.predicted = 1;
+          }
+
+          console.log("ZADARMA RAW CALLBACK TEST PARAMS:", params);
+
+          const result = await zadarmaGet("/v1/request/callback/", params);
+
+          console.log("ZADARMA RAW CALLBACK TEST RESULT:", result);
+
+          await tgSendMessage(
+            chatId,
+            `✅ Zadarma test callback создан\nfrom: ${from}\nto: ${to}`
+          );
+        } catch (err) {
+          console.error("Zadarma raw callback test error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Zadarma test callback ошибка. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
+
+      // --- REALTIME CALL COMMAND ---
+      if (text.startsWith("/rtcall")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(chatId, "Используй: /rtcall +380XXXXXXXXX текст");
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction = parts.slice(2).join(" ");
+
+        try {
+          const result = await startRealtimeOutboundCall({
+            phoneNumber,
+            instruction,
+            chatId,
+            userId
+          });
+
+          console.log("Zadarma realtime callback created:", result);
+
+          await tgSendMessage(
+            chatId,
+            `📞 Realtime-звонок создан: ${phoneNumber}`
+          );
+        } catch (err) {
+          console.error("Realtime call error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Ошибка создания Realtime-звонка. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
+
+      // --- CALL COMMAND ---
+      if (text.startsWith("/call")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 3) {
+          await tgSendMessage(chatId, "Используй: /call +380XXXXXXXXX текст");
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction = parts.slice(2).join(" ");
+
+        const vapiKey = process.env.VAPI_API_KEY;
+        const assistantId = process.env.VAPI_ASSISTANT_ID;
+        const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
+
+        if (!vapiKey || !assistantId || !phoneNumberId) {
+          await tgSendMessage(
+            chatId,
+            "❌ Не настроены ENV: VAPI_API_KEY / VAPI_ASSISTANT_ID / VAPI_PHONE_NUMBER_ID"
+          );
+          return;
+        }
+
+        try {
+          const response = await fetch("https://api.vapi.ai/call", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${vapiKey}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              assistantId: assistantId,
+              phoneNumberId: phoneNumberId,
+              customer: { number: phoneNumber },
+
+              // Для логов Vapi
+              metadata: {
+                instruction
+              },
+
+              // Для мозга ассистента
+              assistantOverrides: {
+                variableValues: {
+                  instruction
+                }
+              }
+            })
+          });
+
+          if (!response.ok) {
+            const errText = await response.text();
+            console.error("Vapi call error:", response.status, errText);
+            await tgSendMessage(chatId, "❌ Ошибка создания звонка (см. логи Render)");
+            return;
+          }
+
+          await tgSendMessage(chatId, "📞 Звонок создан");
+        } catch (err) {
+          console.error("Vapi call exception:", err);
+          await tgSendMessage(chatId, "❌ Ошибка создания звонка");
+        }
+
+        return;
+      }
+
+      const facts = await extractFacts(text);
+      console.log("Extracted facts:", facts);
+
+      if (facts.length > 0) {
+        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+      }
+
+      const memory = await sbGetMemory(userId);
+      const reply = await generateReply(userId, text, memory);
+
+      await tgSendMessage(chatId, reply);
+    } catch (e) {
+      console.error("handler error", e);
+      await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
+    }
+  })();
+});
+
+// ---------- TWILIO VOICE (SAFE TWIML) ----------
+app.post("/voice", (req, res) => {
+  res.set("Content-Type", "text/xml");
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Amy">Кузя на связи.</Say>
+</Response>`;
+
+  res.status(200).send(twiml);
+});
+
+// ---------- OPENAI REALTIME SANDBOX ----------
+const REALTIME_MODEL = "gpt-realtime";
+const REALTIME_VOICE = "marin";
+
+const REALTIME_KUZYA_INSTRUCTIONS = `
+${KUZYA_CORE}
+
+СЕЙЧАС ТЫ РАБОТАЕШЬ В REALTIME-ТЕСТЕ ГОЛОСА.
+
+Ты говоришь с Юлей.
+Это тест нового живого голосового контура без Vapi.
+Твоя задача — быть быстрым, живым и понятным.
+
+Правила:
+— говори по-русски
+— отвечай коротко
+— не говори "чем могу помочь", если контекст понятен
+— не объясняй технические детали без просьбы
+— если Юля проверяет скорость — отвечай сразу и по делу
+— если не расслышал — коротко попроси повторить
+— стиль: живой, уверенный, тёплый, не канцелярский
+`;
+
+app.post(
+  "/realtime/session",
+  express.text({ type: ["application/sdp", "text/plain", "*/*"] }),
+  async (req, res) => {
+    try {
+      const offerSdp = req.body;
+
+      if (!offerSdp || typeof offerSdp !== "string") {
+        return res.status(400).send("Missing SDP offer");
+      }
+
+      const sessionConfig = JSON.stringify({
+        type: "realtime",
+        model: REALTIME_MODEL,
+        instructions: REALTIME_KUZYA_INSTRUCTIONS,
+        audio: {
+          output: {
+            voice: REALTIME_VOICE
+          },
+          input: {
+            transcription: {
+              model: "gpt-4o-transcribe",
+              language: "ru"
+            },
+            turn_detection: {
+              type: "server_vad"
+            },
+            noise_reduction: {
+              type: "near_field"
+            }
+          }
+        }
+      });
+
+      const fd = new FormData();
+      fd.set("sdp", offerSdp);
+      fd.set("session", sessionConfig);
+
+      const openaiRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`
+        },
+        body: fd
+      });
+
+      const answerSdp = await openaiRes.text();
+
+      if (!openaiRes.ok) {
+        console.error("Realtime session error:", openaiRes.status, answerSdp);
+        return res.status(openaiRes.status).send(answerSdp);
+      }
+
+      res.set("Content-Type", "application/sdp");
+      return res.status(200).send(answerSdp);
+    } catch (e) {
+      console.error("Realtime session exception:", e);
+      return res.status(500).send("Realtime session failed");
+    }
+  }
+);
+
+app.get("/realtime-test", (req, res) => {
+  res.set("Content-Type", "text/html; charset=utf-8");
+
+  res.send(`<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kuzya Realtime Test</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111;
+      color: #f5f5f5;
+      padding: 24px;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    p { color: #cfcfcf; line-height: 1.45; }
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 14px 18px;
+      margin: 8px 8px 8px 0;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    #start { background: #fff; color: #111; }
+    #stop { background: #333; color: #fff; }
+    #status {
+      margin-top: 18px;
+      padding: 14px;
+      border-radius: 14px;
+      background: #1d1d1d;
+      color: #d7d7d7;
+      white-space: pre-wrap;
+      min-height: 80px;
+    }
+    .hint {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 12px;
+      border-radius: 14px;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Кузя Realtime Test</h1>
+  <p>Это тест нового голосового контура без Vapi и без Zadarma. Нажми Start, разреши микрофон и говори.</p>
+
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div class="hint">
+    Для проверки скажи: <b>Кузя, ты меня слышишь? Ответь быстро.</b>
+  </div>
+
+  <div id="status">Статус: готов.</div>
+
+  <script>
+    let pc = null;
+    let dc = null;
+    let localStream = null;
+    let remoteAudio = null;
+
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+
+    function log(msg) {
+      statusEl.textContent += "\\n" + msg;
+      statusEl.scrollTop = statusEl.scrollHeight;
+    }
+
+    async function startRealtime() {
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusEl.textContent = "Статус: запускаю...";
+
+      try {
+        pc = new RTCPeerConnection();
+
+        remoteAudio = document.createElement("audio");
+        remoteAudio.autoplay = true;
+        document.body.appendChild(remoteAudio);
+
+        pc.ontrack = (event) => {
+          log("Получен голос Кузи.");
+          remoteAudio.srcObject = event.streams[0];
+        };
+
+        pc.onconnectionstatechange = () => {
+          log("WebRTC: " + pc.connectionState);
+        };
+
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+
+        localStream.getTracks().forEach((track) => {
+          pc.addTrack(track, localStream);
+        });
+
+        dc = pc.createDataChannel("oai-events");
+
+        dc.onopen = () => {
+          log("Data channel открыт.");
+
+          dc.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              instructions: "Поздоровайся с Юлей одной короткой живой фразой и скажи, что realtime-контур запущен."
+            }
+          }));
+        };
+
+        dc.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "response.audio_transcript.done") {
+              log("Кузя текстом: " + data.transcript);
+            }
+
+            if (data.type === "conversation.item.input_audio_transcription.completed") {
+              log("Юля распознано: " + data.transcript);
+            }
+
+            if (data.type === "error") {
+              log("Ошибка Realtime: " + JSON.stringify(data.error || data));
+            }
+          } catch {
+            log("Event: " + event.data);
+          }
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        log("Отправляю SDP на Render...");
+
+        const sdpResponse = await fetch("/realtime/session", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/sdp"
+          },
+          body: offer.sdp
+        });
+
+        const answerText = await sdpResponse.text();
+
+        if (!sdpResponse.ok) {
+          throw new Error(answerText);
+        }
+
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: answerText
+        });
+
+        log("Соединение создано. Говори.");
+      } catch (err) {
+        log("Ошибка запуска: " + (err?.message || String(err)));
+        stopRealtime();
+      }
+    }
+
+    function stopRealtime() {
+      if (dc) {
+        try { dc.close(); } catch {}
+        dc = null;
+      }
+
+      if (pc) {
+        try { pc.close(); } catch {}
+        pc = null;
+      }
+
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+        localStream = null;
+      }
+
+      if (remoteAudio) {
+        try { remoteAudio.remove(); } catch {}
+        remoteAudio = null;
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      log("Остановлено.");
+    }
+
+    startBtn.onclick = startRealtime;
+    stopBtn.onclick = stopRealtime;
+  </script>
+</body>
+</html>`);
+});
+
+// ---------- REALTIME OUTBOUND STATE ----------
+let pendingRealtimeOutboundCall = null;
+
+function normalizeZadarmaPhone(phone) {
+  return String(phone || "").replace(/[^\d]/g, "");
+}
+
+function zadarmaBuildQuery(params) {
+  const sorted = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const usp = new URLSearchParams();
+
+  for (const [key, value] of sorted) {
+    usp.append(key, String(value));
+  }
+
+  return usp.toString();
+}
+
+function zadarmaSignature(method, params, secret) {
+  const paramsStr = zadarmaBuildQuery(params);
+  const md5 = crypto.createHash("md5").update(paramsStr).digest("hex");
+
+  const hmacHex = crypto
+    .createHmac("sha1", secret)
+    .update(method + paramsStr + md5)
+    .digest("hex");
+
+  return Buffer.from(hmacHex).toString("base64");
+}
+
+async function zadarmaGet(method, params) {
+  const key = process.env.ZADARMA_API_KEY;
+  const secret = process.env.ZADARMA_API_SECRET;
+
+  if (!key || !secret) {
+    throw new Error("Missing ZADARMA_API_KEY or ZADARMA_API_SECRET");
+  }
+
+  const paramsStr = zadarmaBuildQuery(params);
+  const signature = zadarmaSignature(method, params, secret);
+
+  const url = `https://api.zadarma.com${method}?${paramsStr}`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `${key}:${signature}`
+    }
+  });
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!response.ok || data.status === "error") {
+    throw new Error(`Zadarma API error: ${response.status} ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
+  const humanPhone = normalizeZadarmaPhone(phoneNumber);
+  const kuzyaTarget = process.env.ZADARMA_CALLBACK_TO || "0-11";
+
+  if (!humanPhone) {
+    throw new Error("Missing target phone number");
+  }
+
+  pendingRealtimeOutboundCall = {
+    phoneNumber,
+    zadarmaTo: humanPhone,
+    instruction,
+    chatId,
+    userId,
+    createdAt: Date.now()
+  };
+
+  const callbackParams = {
+    from: humanPhone,
+    to: kuzyaTarget
+  };
+
+  console.log("REALTIME OUTBOUND PENDING:", {
+    phoneNumber,
+    zadarmaTo: humanPhone,
+    instruction,
+    chatId,
+    userId
+  });
+
+  console.log("ZADARMA CALLBACK PARAMS:", callbackParams);
+
+  return zadarmaGet("/v1/request/callback/", callbackParams);
+}
+
+function getRealtimeCallContext() {
+  const pending = pendingRealtimeOutboundCall;
+  const isFresh =
+    pending &&
+    pending.createdAt &&
+    Date.now() - pending.createdAt < 3 * 60 * 1000;
+
+  if (!isFresh) {
+    return `
+Это входящий звонок.
+Человек сам позвонил Кузе.
+Начни живо и коротко.
+Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
+`;
+  }
+
+  return `
+Это исходящий звонок, который Юля запустила из Telegram.
+
+Кому звоним:
+${pending.phoneNumber}
+
+Задача звонка:
+${pending.instruction || "нет отдельной инструкции"}
+
+Правила исходящего звонка:
+— когда человек ответит, сразу выполни задачу
+— не спрашивай "чем могу помочь"
+— не говори технические детали
+— говори коротко, живо и уверенно
+— если человек не понимает, кто звонит, объясни: "Это Кузя, я звоню по просьбе Юли"
+`;
+}
+
+// ---------- OPENAI REALTIME SIP WEBHOOK ----------
+app.post("/openai-realtime-webhook", async (req, res) => {
+  try {
+    const event = req.body;
+
+    console.log("OPENAI REALTIME WEBHOOK HIT");
+    console.log("OPENAI REALTIME EVENT:", JSON.stringify(event || {}).slice(0, 2000));
+
+    if (event?.type !== "realtime.call.incoming") {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const callId = event?.data?.call_id;
+
+    if (!callId) {
+      console.error("OpenAI realtime webhook: missing call_id");
+      return res.status(200).json({ ok: false, error: "missing_call_id" });
+    }
+
+    const callContext = getRealtimeCallContext();
+
+    const acceptBody = {
+      type: "realtime",
+      model: REALTIME_MODEL,
+      instructions: `
+${KUZYA_CORE}
+
+СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEPHONE REALTIME SIP-КОНТУРЕ.
+
+${callContext}
+
+Правила:
+— говори по-русски
+— отвечай быстро
+— отвечай коротко
+— не говори "чем могу помочь", если контекст понятен
+— если не расслышал — попроси повторить коротко
+— не объясняй технические детали без просьбы
+— стиль: живой, уверенный, тёплый, не канцелярский
+      `,
+      audio: {
+        output: {
+          voice: REALTIME_VOICE
+        },
+        input: {
+          transcription: {
+            model: "gpt-4o-transcribe",
+            language: "ru"
+          },
+          turn_detection: {
+            type: "server_vad"
+          },
+          noise_reduction: {
+            type: "near_field"
+          }
+        }
+      }
+    };
+
+    const acceptRes = await fetch(
+      `https://api.openai.com/v1/realtime/calls/${callId}/accept`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(acceptBody)
+      }
+    );
+
+    const acceptText = await acceptRes.text();
+
+    if (!acceptRes.ok) {
+      console.error("OpenAI realtime accept error:", acceptRes.status, acceptText);
+      return res.status(200).json({
+        ok: false,
+        accept_status: acceptRes.status,
+        accept_error: acceptText
+      });
+    }
+
+    console.log("OpenAI realtime call accepted:", callId);
+
+    if (pendingRealtimeOutboundCall) {
+      pendingRealtimeOutboundCall.callId = callId;
+    }
+
+    return res.status(200).json({ ok: true, accepted: true, callId });
+  } catch (e) {
+    console.error("OpenAI realtime webhook exception:", e);
+    return res.status(200).json({ ok: false, error: "exception" });
+  }
+});
+
+// ---------- START ----------
+app.listen(PORT, () => {
+  console.log(`Кузя запущен на порту ${PORT}`);
+});
