@@ -885,6 +885,31 @@ function normalizeLiveKitPhone(phone) {
   return "+" + digits;
 }
 
+function extractPhoneAndInstruction(text, commandName) {
+  const raw = String(text || "").trim();
+
+  const withoutCommand = raw
+    .replace(new RegExp(`^\\/${commandName}(?:@\\w+)?\\s*`, "i"), "")
+    .trim();
+
+  const phoneMatch = withoutCommand.match(/(\+?\d[\d\s().-]{7,}\d)/);
+
+  if (!phoneMatch) {
+    return {
+      phoneNumber: "",
+      instruction: withoutCommand
+    };
+  }
+
+  const phoneNumber = phoneMatch[1].replace(/[^\d+]/g, "");
+  const instruction = withoutCommand.replace(phoneMatch[1], "").trim();
+
+  return {
+    phoneNumber,
+    instruction
+  };
+}
+
 function getLiveKitHttpUrl() {
   const url = String(process.env.LIVEKIT_URL || "").trim();
 
@@ -1041,20 +1066,19 @@ app.post("/webhook", async (req, res) => {
 
       // --- LIVEKIT OUTBOUND CALL COMMAND ---
       if (text.startsWith("/lkcall")) {
-        const parts = text.split(" ");
+        const parsed = extractPhoneAndInstruction(text, "lkcall");
+        const phoneNumber = parsed.phoneNumber;
+        const instruction =
+          parsed.instruction ||
+          "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.";
 
-        if (parts.length < 2) {
+        if (!phoneNumber) {
           await tgSendMessage(
             chatId,
             "Используй: /lkcall +380XXXXXXXXX текст, который Кузя должен сказать"
           );
           return;
         }
-
-        const phoneNumber = parts[1];
-        const instruction =
-          parts.slice(2).join(" ").trim() ||
-          "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.";
 
         try {
           const result = await startLiveKitOutboundCall({
