@@ -1265,7 +1265,7 @@ app.post("/voice", (req, res) => {
 
 // ---------- OPENAI REALTIME SANDBOX ----------
 const REALTIME_MODEL = "gpt-realtime";
-const REALTIME_VOICE = "marin";
+const REALTIME_VOICE = process.env.OPENAI_REALTIME_VOICE || "verse";
 
 const REALTIME_KUZYA_INSTRUCTIONS = `
 ${KUZYA_CORE}
