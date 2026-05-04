@@ -958,7 +958,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
 
   console.log("LIVEKIT AGENT DISPATCH RESULT:", dispatch);
 
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
   console.log("LIVEKIT OUTBOUND TEST:", {
     livekitUrl,
