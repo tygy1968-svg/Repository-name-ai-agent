@@ -63,10 +63,12 @@ export default defineAgent({
       content: `Контекст звонка: ${instruction}`
     });
 
+    await ctx.connect();
+
     const session = new voice.AgentSession({
       llm: new openai.realtime.RealtimeModel({
         model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
-        voice: process.env.OPENAI_REALTIME_VOICE || "marin"
+        voice: process.env.OPENAI_REALTIME_VOICE || "verse"
       })
     });
 
@@ -74,8 +76,6 @@ export default defineAgent({
       room: ctx.room,
       agent: new KuzyaAgent(initialCtx)
     });
-
-    await ctx.connect();
 
     await session.generateReply({
       instructions: instruction
