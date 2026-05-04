@@ -77,6 +77,14 @@ export default defineAgent({
       agent: new KuzyaAgent(initialCtx)
     });
 
+    const participant = await ctx.waitForParticipant();
+
+    console.log("KUZYA LIVEKIT PARTICIPANT JOINED:", {
+      identity: participant.identity,
+      kind: participant.kind,
+      attributes: participant.attributes
+    });
+
     await session.generateReply({
       instructions: instruction
     });
