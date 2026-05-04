@@ -1039,6 +1039,46 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
+      // --- LIVEKIT OUTBOUND CALL COMMAND ---
+      if (text.startsWith("/lkcall")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 2) {
+          await tgSendMessage(
+            chatId,
+            "Используй: /lkcall +380XXXXXXXXX текст, который Кузя должен сказать"
+          );
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction =
+          parts.slice(2).join(" ").trim() ||
+          "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.";
+
+        try {
+          const result = await startLiveKitOutboundCall({
+            phoneNumber,
+            instruction,
+            chatId,
+            userId
+          });
+
+          await tgSendMessage(
+            chatId,
+            `📞 Кузя звонит через LiveKit\nroom: ${result.roomName}\nto: ${result.to}`
+          );
+        } catch (err) {
+          console.error("LiveKit outbound call error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Ошибка LiveKit-звонка. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
+
       // --- ZADARMA RAW CALLBACK TEST ---
       if (text.startsWith("/ztest")) {
         const parts = text.split(" ");
