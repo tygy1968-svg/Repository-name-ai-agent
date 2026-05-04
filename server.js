@@ -1,5 +1,6 @@
 import express from "express";
 import crypto from "crypto";
+import { SipClient } from "livekit-server-sdk";
 
 const app = express();
 app.use(express.json());
@@ -863,6 +864,94 @@ app.post("/vapi-webhook", async (req, res) => {
   }
 });
 
+// ---------- LIVEKIT OUTBOUND TEST ----------
+function normalizeLiveKitPhone(phone) {
+  const raw = String(phone || "").trim();
+
+  if (raw.startsWith("+")) {
+    return "+" + raw.slice(1).replace(/[^\d]/g, "");
+  }
+
+  const digits = raw.replace(/[^\d]/g, "");
+
+  if (digits.startsWith("380")) {
+    return "+" + digits;
+  }
+
+  if (digits.startsWith("0")) {
+    return "+38" + digits;
+  }
+
+  return "+" + digits;
+}
+
+function getLiveKitHttpUrl() {
+  const url = String(process.env.LIVEKIT_URL || "").trim();
+
+  if (!url) return "";
+
+  return url
+    .replace(/^wss:\/\//i, "https://")
+    .replace(/^ws:\/\//i, "http://");
+}
+
+async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, userId }) {
+  const livekitUrl = getLiveKitHttpUrl();
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const sipTrunkId = process.env.LIVEKIT_SIP_TRUNK_ID;
+
+  if (!livekitUrl || !apiKey || !apiSecret || !sipTrunkId) {
+    throw new Error(
+      "Missing LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET / LIVEKIT_SIP_TRUNK_ID"
+    );
+  }
+
+  const to = normalizeLiveKitPhone(phoneNumber);
+  const roomName = `kuzya-livekit-${Date.now()}`;
+  const participantIdentity = `phone-${to.replace(/[^\d]/g, "")}`;
+
+  const sipClient = new SipClient(livekitUrl, apiKey, apiSecret);
+
+  console.log("LIVEKIT OUTBOUND TEST:", {
+    livekitUrl,
+    sipTrunkId,
+    to,
+    roomName,
+    participantIdentity,
+    instruction,
+    chatId,
+    userId
+  });
+
+  const result = await sipClient.createSipParticipant(
+    sipTrunkId,
+    to,
+    roomName,
+    {
+      participantIdentity,
+      participantName: to,
+      krispEnabled: true,
+      waitUntilAnswered: false,
+      metadata: JSON.stringify({
+        source: "telegram-lktest",
+        phoneNumber: to,
+        instruction: instruction || "",
+        chatId,
+        userId
+      })
+    }
+  );
+
+  console.log("LIVEKIT OUTBOUND RESULT:", result);
+
+  return {
+    roomName,
+    to,
+    result
+  };
+}
+
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
@@ -898,6 +987,41 @@ app.post("/webhook", async (req, res) => {
       if (typeof msg.text !== "string") return;
 
       const text = msg.text.trim();
+
+      // --- LIVEKIT TEST CALL COMMAND ---
+      if (text.startsWith("/lktest")) {
+        const parts = text.split(" ");
+
+        if (parts.length < 2) {
+          await tgSendMessage(chatId, "Используй: /lktest +380XXXXXXXXX текст");
+          return;
+        }
+
+        const phoneNumber = parts[1];
+        const instruction = parts.slice(2).join(" ");
+
+        try {
+          const result = await startLiveKitOutboundCall({
+            phoneNumber,
+            instruction,
+            chatId,
+            userId
+          });
+
+          await tgSendMessage(
+            chatId,
+            `📞 LiveKit test call создан\nroom: ${result.roomName}\nto: ${result.to}`
+          );
+        } catch (err) {
+          console.error("LiveKit test call error:", err);
+          await tgSendMessage(
+            chatId,
+            "❌ Ошибка LiveKit test call. Смотри Render logs."
+          );
+        }
+
+        return;
+      }
 
       // --- ZADARMA RAW CALLBACK TEST ---
       if (text.startsWith("/ztest")) {
