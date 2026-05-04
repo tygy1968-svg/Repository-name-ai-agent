@@ -27,6 +27,7 @@ console.log("SERP API:", !!process.env.SERP_API_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
+const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
 
 const KUZYA_CORE = `
 Ты — Кузя.
@@ -252,6 +253,97 @@ async function sbSearchMemory(userId, queryText, k = 5) {
   }
 
   return res.json();
+}
+
+// ---------- CALL SESSIONS ----------
+function normalizePhoneForMemory(phone) {
+  return normalizeLiveKitPhone(phone).replace(/[^\d]/g, "");
+}
+
+async function sbCreateCallSession({
+  direction,
+  phoneNumber,
+  instruction,
+  chatId,
+  userId,
+  roomName,
+  source = "telegram-lkcall",
+  metadata = {}
+}) {
+  const normalizedPhone = normalizePhoneForMemory(phoneNumber);
+
+  const res = await fetch(SUPABASE_CALL_SESSIONS_URL, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify([
+      {
+        direction,
+        status: "created",
+        phone_number: phoneNumber,
+        normalized_phone: normalizedPhone,
+        telegram_chat_id: chatId ? String(chatId) : null,
+        telegram_user_id: userId ? String(userId) : null,
+        instruction: instruction || null,
+        room_name: roomName || null,
+        source,
+        metadata
+      }
+    ])
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    console.error("Supabase call session create error:", res.status, text);
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(text);
+    return Array.isArray(data) ? data[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sbUpdateCallSession(id, patch) {
+  if (!id) return null;
+
+  const res = await fetch(
+    `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        ...patch,
+        updated_at: new Date().toISOString()
+      })
+    }
+  );
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    console.error("Supabase call session update error:", res.status, text);
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(text);
+    return Array.isArray(data) ? data[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- OPENAI ----------
@@ -936,61 +1028,122 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
   const roomName = `kuzya-livekit-${Date.now()}`;
   const participantIdentity = `phone-${to.replace(/[^\d]/g, "")}`;
 
-  const sipClient = new SipClient(livekitUrl, apiKey, apiSecret);
-
-  const metadata = JSON.stringify({
-    source: "telegram-lktest",
+  const callSession = await sbCreateCallSession({
+    direction: "outbound",
     phoneNumber: to,
-    instruction: instruction || "Скажи: Юля, я на связи. Это LiveKit-тест без callback-фразы.",
-    chatId,
-    userId
-  });
-
-  const dispatchClient = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
-
-  const dispatch = await dispatchClient.createDispatch(
-    roomName,
-    "kuzya-agent",
-    {
-      metadata
-    }
-  );
-
-  console.log("LIVEKIT AGENT DISPATCH RESULT:", dispatch);
-
-  await new Promise((resolve) => setTimeout(resolve, 300));
-
-  console.log("LIVEKIT OUTBOUND TEST:", {
-    livekitUrl,
-    sipTrunkId,
-    to,
-    roomName,
-    participantIdentity,
     instruction,
     chatId,
+    userId,
+    roomName,
+    source: "telegram-lkcall",
+    metadata: {
+      transport: "livekit",
+      trunkId: sipTrunkId
+    }
+  });
+
+  const callSessionId = callSession?.id || null;
+
+  const metadata = JSON.stringify({
+    source: "telegram-lkcall",
+    direction: "outbound",
+    callSessionId,
+    phoneNumber: to,
+    instruction:
+      instruction ||
+      "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.",
+    chatId,
     userId
   });
 
-  const result = await sipClient.createSipParticipant(
-    sipTrunkId,
-    to,
-    roomName,
-    {
-      participantIdentity,
-      participantName: to,
-      krispEnabled: true,
-      waitUntilAnswered: false,
-      metadata
+  const sipClient = new SipClient(livekitUrl, apiKey, apiSecret);
+  const dispatchClient = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
+
+  try {
+    const dispatch = await dispatchClient.createDispatch(
+      roomName,
+      "kuzya-agent",
+      {
+        metadata
+      }
+    );
+
+    console.log("LIVEKIT AGENT DISPATCH RESULT:", dispatch);
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "agent_dispatched",
+        metadata: {
+          transport: "livekit",
+          trunkId: sipTrunkId,
+          dispatch
+        }
+      });
     }
-  );
 
-  console.log("LIVEKIT OUTBOUND RESULT:", result);
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-  return {
-    roomName,
-    to,
-    result
-  };
+    console.log("LIVEKIT OUTBOUND TEST:", {
+      livekitUrl,
+      sipTrunkId,
+      to,
+      roomName,
+      participantIdentity,
+      instruction,
+      chatId,
+      userId,
+      callSessionId
+    });
+
+    const result = await sipClient.createSipParticipant(
+      sipTrunkId,
+      to,
+      roomName,
+      {
+        participantIdentity,
+        participantName: to,
+        krispEnabled: true,
+        waitUntilAnswered: false,
+        metadata
+      }
+    );
+
+    console.log("LIVEKIT OUTBOUND RESULT:", result);
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "sip_created",
+        sip_call_id: result?.sipCallId || null,
+        livekit_participant_id: result?.participantId || null,
+        livekit_participant_identity: result?.participantIdentity || participantIdentity,
+        metadata: {
+          transport: "livekit",
+          trunkId: sipTrunkId,
+          sipResult: result
+        }
+      });
+    }
+
+    return {
+      roomName,
+      to,
+      callSessionId,
+      result
+    };
+  } catch (err) {
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "failed",
+        metadata: {
+          transport: "livekit",
+          trunkId: sipTrunkId,
+          error: err?.message || String(err)
+        }
+      });
+    }
+
+    throw err;
+  }
 }
 
 // ---------- WEBHOOK ----------
