@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-import { SipClient } from "livekit-server-sdk";
+import { SipClient, AgentDispatchClient } from "livekit-server-sdk";
 
 const app = express();
 app.use(express.json());
@@ -913,6 +913,28 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
 
   const sipClient = new SipClient(livekitUrl, apiKey, apiSecret);
 
+  const metadata = JSON.stringify({
+    source: "telegram-lktest",
+    phoneNumber: to,
+    instruction: instruction || "Скажи: Юля, я на связи. Это LiveKit-тест без callback-фразы.",
+    chatId,
+    userId
+  });
+
+  const dispatchClient = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
+
+  const dispatch = await dispatchClient.createDispatch(
+    roomName,
+    "kuzya-agent",
+    {
+      metadata
+    }
+  );
+
+  console.log("LIVEKIT AGENT DISPATCH RESULT:", dispatch);
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
   console.log("LIVEKIT OUTBOUND TEST:", {
     livekitUrl,
     sipTrunkId,
@@ -933,13 +955,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
       participantName: to,
       krispEnabled: true,
       waitUntilAnswered: false,
-      metadata: JSON.stringify({
-        source: "telegram-lktest",
-        phoneNumber: to,
-        instruction: instruction || "",
-        chatId,
-        userId
-      })
+      metadata
     }
   );
 
