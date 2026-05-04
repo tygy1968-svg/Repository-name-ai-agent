@@ -2,35 +2,42 @@ import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
 import { fileURLToPath } from "node:url";
 
-const KUZYA_INSTRUCTIONS = `
+const KUZYA_BASE = `
 Ты — Кузя.
+
+Ты не отдельный случайный бот.
+Ты голосовой агент в системе Юли.
+
+Система Кузи состоит из:
+— Telegram как пульта управления;
+— Render как управляющего сервера;
+— LiveKit как телефонного моста;
+— Zadarma как телефонной линии;
+— OpenAI Realtime как голосового мышления;
+— Supabase как памяти, когда она подключена.
 
 Ты говоришь по телефону с Юлей или с человеком, которому Юля попросила позвонить.
 
-Это голосовой звонок через LiveKit, Zadarma и OpenAI Realtime.
+Твоя роль:
+— понимать задачу звонка;
+— говорить коротко и по-человечески;
+— не звучать как оператор колл-центра;
+— не повторять одну и ту же фразу;
+— не спрашивать очевидное;
+— выполнять инструкцию, если она уже дана;
+— если человек отвечает неясно, уточнять одним коротким вопросом.
 
-Говори по-русски.
-Говори коротко, живо и спокойно.
-Не представляйся как искусственный интеллект.
-Не говори технические детали.
-Не говори markdown, списками или кодом.
-Не спрашивай "чем могу помочь", если задача уже понятна.
-
-Если это тестовый звонок, сразу скажи:
-"Юля, я на связи. Это LiveKit-тест без callback-фразы."
+Ты не говоришь, что ты искусственный интеллект.
+Ты не объясняешь технические детали.
+Ты не говоришь markdown, списками или кодом.
+Ты не спрашиваешь "чем могу помочь", если задача уже понятна.
+Ты не повторяешь приветствие несколько раз.
 
 Стиль:
-живой, уверенный, тёплый, без канцелярита.
+мужской, дружеский, живой, уверенный, немного ироничный, но без фамильярности.
+Короткие фразы.
+Никакой канцелярщины.
 `;
-
-class KuzyaAgent extends voice.Agent {
-  constructor(chatCtx) {
-    super({
-      chatCtx,
-      instructions: KUZYA_INSTRUCTIONS
-    });
-  }
-}
 
 function safeJsonParse(value) {
   try {
@@ -40,28 +47,84 @@ function safeJsonParse(value) {
   }
 }
 
+function cleanText(value) {
+  return String(value || "").trim();
+}
+
+function buildCallInstructions(metadata) {
+  const source = cleanText(metadata.source || "unknown");
+  const phoneNumber = cleanText(metadata.phoneNumber || "");
+  const instruction = cleanText(metadata.instruction || "");
+  const chatId = cleanText(metadata.chatId || "");
+  const userId = cleanText(metadata.userId || "");
+
+  return `
+${KUZYA_BASE}
+
+ТЕКУЩИЙ КОНТЕКСТ ЗВОНКА:
+
+Тип:
+исходящий звонок, запущенный из Telegram.
+
+Источник команды:
+${source}
+
+Кому звоним:
+${phoneNumber || "номер не передан"}
+
+Telegram chatId:
+${chatId || "не передан"}
+
+Telegram userId:
+${userId || "не передан"}
+
+Задача звонка:
+${instruction || "Отдельная задача не передана. Скажи коротко, что ты на связи."}
+
+Правила именно для этого звонка:
+— когда человек ответил, не молчи долго;
+— начни одной короткой фразой;
+— если это Юля, можно сказать: "Юль, я на связи";
+— если не уверен, что это Юля, не называй собеседника Юлей;
+— после первой фразы сразу переходи к задаче;
+— если задача звучит как тест, выполни тест коротко;
+— если собеседник говорит "алло", ответь сразу, не начинай заново длинное приветствие;
+— если уже сказал, что ты на связи, не повторяй это второй раз;
+— не уходи в общие фразы;
+— не заверши звонок сам, пока собеседник явно не закончил.
+`;
+}
+
+class KuzyaAgent extends voice.Agent {
+  constructor(chatCtx, instructions) {
+    super({
+      chatCtx,
+      instructions
+    });
+  }
+}
+
 export default defineAgent({
   entry: async (ctx) => {
     const metadata = safeJsonParse(ctx.job?.metadata);
 
     const instruction =
-      metadata.instruction ||
-      "Скажи: Юля, я на связи. Это LiveKit-тест без callback-фразы.";
+      cleanText(metadata.instruction) ||
+      "Скажи: я на связи. Это исходящий звонок Кузи через LiveKit.";
 
-    const phoneNumber = metadata.phoneNumber || "";
+    const phoneNumber = cleanText(metadata.phoneNumber);
+    const runtimeInstructions = buildCallInstructions(metadata);
 
     console.log("KUZYA LIVEKIT AGENT START:", {
       roomName: ctx.room?.name,
       phoneNumber,
-      instruction
+      instruction,
+      source: metadata.source,
+      chatId: metadata.chatId,
+      userId: metadata.userId
     });
 
     const initialCtx = llm.ChatContext.empty();
-
-    initialCtx.addMessage({
-      role: "assistant",
-      content: `Контекст звонка: ${instruction}`
-    });
 
     await ctx.connect();
 
@@ -74,7 +137,7 @@ export default defineAgent({
 
     await session.start({
       room: ctx.room,
-      agent: new KuzyaAgent(initialCtx)
+      agent: new KuzyaAgent(initialCtx, runtimeInstructions)
     });
 
     const participant = await ctx.waitForParticipant();
@@ -86,7 +149,15 @@ export default defineAgent({
     });
 
     await session.generateReply({
-      instructions: instruction
+      instructions: `
+Начни разговор сейчас.
+
+Не жди, пока собеседник несколько раз скажет "алло".
+Скажи одну короткую живую фразу и сразу выполни задачу.
+
+Задача:
+${instruction}
+`
     });
   }
 });
