@@ -22,6 +22,7 @@ if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
 
 // --- TEMP ENV DEBUG ---
 console.log("SERP API:", !!process.env.SERP_API_KEY);
+console.log("SERVER_VERSION: call_sessions_debug_enabled_2026_05_06");
 
 // ---------- CONST ----------
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
