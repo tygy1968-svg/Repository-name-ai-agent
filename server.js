@@ -1230,7 +1230,7 @@ app.post("/webhook", async (req, res) => {
 
           await tgSendMessage(
             chatId,
-            `📞 LiveKit test call создан\nroom: ${result.roomName}\nto: ${result.to}`
+            `📞 LiveKit test call создан\nroom: ${result.roomName}\nto: ${result.to}\nsession: ${result.callSessionId || "null"}`
           );
         } catch (err) {
           console.error("LiveKit test call error:", err);
@@ -1269,7 +1269,7 @@ app.post("/webhook", async (req, res) => {
 
           await tgSendMessage(
             chatId,
-            `📞 Кузя звонит через LiveKit\nroom: ${result.roomName}\nto: ${result.to}`
+            `📞 Кузя звонит через LiveKit\nroom: ${result.roomName}\nto: ${result.to}\nsession: ${result.callSessionId || "null"}`
           );
         } catch (err) {
           console.error("LiveKit outbound call error:", err);
