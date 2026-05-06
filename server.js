@@ -270,6 +270,16 @@ async function sbCreateCallSession({
   source = "telegram-lkcall",
   metadata = {}
 }) {
+  console.log("CALL_SESSION_DEBUG: sbCreateCallSession called", {
+    direction,
+    phoneNumber,
+    instruction,
+    chatId,
+    userId,
+    roomName,
+    source
+  });
+
   const normalizedPhone = normalizePhoneForMemory(phoneNumber);
 
   const res = await fetch(SUPABASE_CALL_SESSIONS_URL, {
@@ -297,6 +307,12 @@ async function sbCreateCallSession({
   });
 
   const text = await res.text();
+
+  console.log("CALL_SESSION_DEBUG: Supabase insert response", {
+    status: res.status,
+    ok: res.ok,
+    text
+  });
 
   if (!res.ok) {
     console.error("Supabase call session create error:", res.status, text);
@@ -1013,6 +1029,13 @@ function getLiveKitHttpUrl() {
 }
 
 async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, userId }) {
+  console.log("CALL_SESSION_DEBUG: startLiveKitOutboundCall entered", {
+    phoneNumber,
+    instruction,
+    chatId,
+    userId
+  });
+
   const livekitUrl = getLiveKitHttpUrl();
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
@@ -1041,6 +1064,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
       trunkId: sipTrunkId
     }
   });
+
+  console.log("CALL_SESSION_DEBUG: created callSession", callSession);
 
   const callSessionId = callSession?.id || null;
 
