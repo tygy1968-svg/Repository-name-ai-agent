@@ -220,10 +220,6 @@ export default defineAgent({
 
     await waitForSipActive(ctx, participant);
 
-    // Даём мобильной линии открыть аудио после answer/active,
-    // чтобы первые слова не обрезались.
-    await sleep(900);
-
     await session.generateReply({
       instructions: `
 Человек поднял трубку.
