@@ -317,7 +317,13 @@ async function sbCreateCallSession({
 
   if (!res.ok) {
     console.error("Supabase call session create error:", res.status, text);
-    return null;
+    return {
+      id: null,
+      error: {
+        status: res.status,
+        text
+      }
+    };
   }
 
   try {
@@ -1068,7 +1074,21 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
 
   console.log("CALL_SESSION_DEBUG: created callSession", callSession);
 
+  if (callSession?.error) {
+    await tgSendMessage(
+      chatId,
+      `⚠️ Supabase call_sessions error\nstatus: ${callSession.error.status}\ntext: ${String(callSession.error.text).slice(0, 900)}`
+    );
+  }
+
   const callSessionId = callSession?.id || null;
+
+  if (!callSessionId) {
+    await tgSendMessage(
+      chatId,
+      "⚠️ call_sessions не создалась. Смотри Render logs: Supabase insert response"
+    );
+  }
 
   const metadata = JSON.stringify({
     source: "telegram-lkcall",
