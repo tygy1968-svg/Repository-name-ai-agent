@@ -2,6 +2,8 @@ import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
 import { fileURLToPath } from "node:url";
 
+console.log("AGENT_VERSION: one_kuzya_context_bridge_2026_05_07");
+
 const {
   SUPABASE_URL,
   SUPABASE_KEY
