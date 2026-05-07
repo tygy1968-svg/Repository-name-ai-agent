@@ -586,6 +586,40 @@ export default defineAgent({
 
     await waitForSipActive(ctx, participant);
 
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "answered",
+        summary: "Собеседник поднял трубку. Голосовой Кузя получил активное соединение и готов начать разговор.",
+        self_review: "Кузя корректно дождался реального поднятия трубки перед первой репликой.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          answeredAt: new Date().toISOString(),
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: "SIP call became active.",
+      response: "Собеседник поднял трубку, голосовой Кузя начинает разговор.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "call_answered",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Исходящий звонок стал активным: трубку подняли.",
+      selfReview: "Кузя не начал говорить до поднятия трубки, связь с call_session сохранена.",
+      nextAction: "Сказать первую короткую фразу и выполнить задачу звонка.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber
+      }
+    });
+
     await session.generateReply({
       instructions: `
 Человек поднял трубку.
@@ -613,6 +647,40 @@ export default defineAgent({
 Задача:
 ${instruction}
 `
+    });
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "initial_reply_sent",
+        summary: "Кузя дождался поднятия трубки и отправил первую голосовую реплику по задаче звонка.",
+        self_review: "Первый голосовой шаг выполнен: Кузя стартовал не как отдельный бот, а как часть единого контекста Telegram + звонок.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          initialReplySentAt: new Date().toISOString(),
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: instruction,
+      response: "Кузя отправил первую голосовую реплику после поднятия трубки.",
+      channel: "outbound_call",
+      direction: "outgoing",
+      eventType: "initial_voice_reply_sent",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Первая голосовая реплика в исходящем звонке отправлена после поднятия трубки.",
+      selfReview: "Кузя выполнил правильный порядок: сначала дождался active, затем начал разговор.",
+      nextAction: "После полноценной расшифровки звонков добавить итог разговора и глубокий self_review.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber
+      }
     });
   }
 });
