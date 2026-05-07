@@ -2,6 +2,25 @@ import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
 import { fileURLToPath } from "node:url";
 
+const {
+  SUPABASE_URL,
+  SUPABASE_KEY
+} = process.env;
+
+const SUPABASE_AGENT_STATE_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/agent_state`
+  : "";
+
+const SUPABASE_KUZIA_INTERACTIONS_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/kuzia_interactions`
+  : "";
+
+const SUPABASE_CALL_SESSIONS_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/call_sessions`
+  : "";
+
+const KUZYA_OWNER_USER_ID = "yulia";
+
 const KUZYA_INSTRUCTIONS = `
 Ты — Кузя.
 
@@ -81,15 +100,252 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildCallInstructions(metadata) {
+function supabaseHeaders() {
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    "Content-Type": "application/json"
+  };
+}
+
+function hasSupabase() {
+  return Boolean(SUPABASE_URL && SUPABASE_KEY);
+}
+
+function clipText(value, limit = 2500) {
+  const text = String(value || "");
+  return text.length > limit ? text.slice(0, limit) : text;
+}
+
+function normalizePhoneForMemory(phone) {
+  return String(phone || "").replace(/[^\d]/g, "");
+}
+
+async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
+  if (!hasSupabase()) return "";
+
+  try {
+    const res = await fetch(
+      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_AGENT_STATE_READ_ERROR:", res.status, await res.text());
+      return "";
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0]?.summary ? data[0].summary : "";
+  } catch (e) {
+    console.error("KUZYA_AGENT_STATE_EXCEPTION:", e);
+    return "";
+  }
+}
+
+async function sbGetCallSession(callSessionId) {
+  if (!hasSupabase() || !callSessionId) return null;
+
+  try {
+    const res = await fetch(
+      `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}&select=*&limit=1`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_CALL_SESSION_READ_ERROR:", res.status, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0] ? data[0] : null;
+  } catch (e) {
+    console.error("KUZYA_CALL_SESSION_EXCEPTION:", e);
+    return null;
+  }
+}
+
+async function sbGetRecentKuziaInteractions(limit = 8) {
+  if (!hasSupabase()) return [];
+
+  try {
+    const select = [
+      "timestamp",
+      "channel",
+      "direction",
+      "event_type",
+      "summary",
+      "stimulus",
+      "response",
+      "next_action",
+      "normalized_phone",
+      "telegram_user_id",
+      "call_session_id",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.${KUZYA_OWNER_USER_ID}&select=${select}&order=timestamp.desc&limit=${limit}`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_INTERACTIONS_READ_ERROR:", res.status, await res.text());
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("KUZYA_INTERACTIONS_EXCEPTION:", e);
+    return [];
+  }
+}
+
+function formatRecentInteractionsForPrompt(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return "нет";
+
+  return items
+    .slice(0, 8)
+    .map((item, index) => {
+      const channel = item.channel || "unknown";
+      const type = item.event_type || "interaction";
+      const summary =
+        item.summary ||
+        item.response ||
+        item.stimulus ||
+        "";
+
+      const next = item.next_action ? `\nНезакрыто: ${item.next_action}` : "";
+
+      return `${index + 1}. Канал: ${channel}. Тип: ${type}. Смысл: ${clipText(summary, 500)}${next}`;
+    })
+    .join("\n");
+}
+
+async function sbLogKuziaInteraction({
+  stimulus = "",
+  response = "",
+  channel = "outbound_call",
+  direction = "internal",
+  eventType = "voice_agent_event",
+  callSessionId = null,
+  telegramChatId = null,
+  telegramUserId = null,
+  normalizedPhone = null,
+  summary = "",
+  selfReview = "",
+  nextAction = "",
+  importance = 0,
+  metadata = {}
+} = {}) {
+  if (!hasSupabase()) return false;
+
+  try {
+    const payload = [
+      {
+        user_id: KUZYA_OWNER_USER_ID,
+        stimulus: clipText(stimulus, 5000),
+        response: clipText(response, 5000),
+        evolution_level: 1.0,
+        timestamp: new Date().toISOString(),
+
+        channel,
+        direction,
+        event_type: eventType,
+        call_session_id: callSessionId || null,
+
+        telegram_chat_id: telegramChatId ? String(telegramChatId) : null,
+        telegram_user_id: telegramUserId ? String(telegramUserId) : null,
+        normalized_phone: normalizedPhone ? String(normalizedPhone) : null,
+
+        summary: clipText(summary, 5000),
+        self_review: clipText(selfReview, 5000),
+        next_action: clipText(nextAction, 5000),
+        importance,
+        metadata
+      }
+    ];
+
+    const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("KUZYA_INTERACTION_WRITE_ERROR:", res.status, text);
+      return false;
+    }
+
+    console.log("KUZYA_INTERACTION_WRITTEN:", {
+      channel,
+      direction,
+      eventType,
+      callSessionId,
+      telegramChatId,
+      normalizedPhone
+    });
+
+    return true;
+  } catch (e) {
+    console.error("KUZYA_INTERACTION_WRITE_EXCEPTION:", e);
+    return false;
+  }
+}
+
+function buildCallInstructions(
+  metadata,
+  {
+    agentStateSummary = "",
+    callSession = null,
+    recentInteractionsText = ""
+  } = {}
+) {
   const source = cleanText(metadata.source || "unknown");
   const phoneNumber = cleanText(metadata.phoneNumber || "");
   const instruction = cleanText(metadata.instruction || "");
   const chatId = cleanText(metadata.chatId || "");
   const userId = cleanText(metadata.userId || "");
+  const callSessionId = cleanText(metadata.callSessionId || "");
+
+  const callSessionContext = callSession
+    ? `
+Связанная запись звонка:
+— направление: ${callSession.direction || "не указано"}
+— статус: ${callSession.status || "не указано"}
+— номер: ${callSession.phone_number || phoneNumber || "не передан"}
+— инструкция: ${callSession.instruction || instruction || "не передана"}
+`
+    : "Связанная запись звонка не найдена.";
 
   return `
 ${KUZYA_INSTRUCTIONS}
+
+ВНУТРЕННЯЯ НЕПРЕРЫВНОСТЬ:
+${agentStateSummary || "Кузя — один и тот же агент Юли в Telegram, исходящих звонках и входящих звонках."}
+
+ВАЖНО:
+— ты тот же самый Кузя, который общается с Юлей в Telegram;
+— этот звонок не отдельный эпизод, а часть общей истории;
+— если задача пришла из Telegram, воспринимай звонок как продолжение Telegram-команды;
+— используй внутренний контекст для понимания ситуации;
+— НЕ произноси внутренний контекст вслух;
+— НЕ говори о таблицах, базе, session, логах или технических системах.
+
+ПОСЛЕДНИЕ СОБЫТИЯ ОБЩЕЙ ИСТОРИИ:
+${recentInteractionsText || "нет"}
 
 ТЕКУЩИЙ КОНТЕКСТ ЗВОНКА:
 
@@ -108,6 +364,11 @@ ${chatId || "не передан"}
 Telegram userId:
 ${userId || "не передан"}
 
+callSessionId:
+${callSessionId || "не передан"}
+
+${callSessionContext}
+
 Задача звонка:
 ${instruction || "Отдельная задача не передана. Скажи коротко, что ты на связи."}
 
@@ -122,6 +383,9 @@ ${instruction || "Отдельная задача не передана. Ска�
 — если уже сказал, что ты на связи, не повторяй это второй раз;
 — не уходи в общие фразы;
 — не заверши звонок сам, пока собеседник явно не закончил.
+
+Главное внутреннее правило:
+ты не отдельный телефонный бот. Ты Кузя, тот же самый, что в Telegram.
 `;
 }
 
@@ -180,15 +444,59 @@ export default defineAgent({
       "Скажи: я на связи. Это исходящий звонок Кузи через LiveKit.";
 
     const phoneNumber = cleanText(metadata.phoneNumber);
-    const runtimeInstructions = buildCallInstructions(metadata);
+    const callSessionId = cleanText(metadata.callSessionId || "");
+    const normalizedPhone = normalizePhoneForMemory(phoneNumber);
+
+    const [agentStateSummary, callSession, recentInteractions] = await Promise.all([
+      sbGetAgentState(KUZYA_OWNER_USER_ID),
+      sbGetCallSession(callSessionId),
+      sbGetRecentKuziaInteractions(8)
+    ]);
+
+    const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
+
+    const runtimeInstructions = buildCallInstructions(metadata, {
+      agentStateSummary,
+      callSession,
+      recentInteractionsText
+    });
+
+    await sbLogKuziaInteraction({
+      stimulus: instruction,
+      response: "Голосовой агент LiveKit запущен и получил общий контекст Кузи перед звонком.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "voice_agent_started",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Голосовой Кузя стартовал с общим состоянием, последними взаимодействиями и связанной записью звонка.",
+      selfReview: "Этот запуск должен восприниматься как продолжение единой истории Кузи между Telegram и голосовыми звонками.",
+      nextAction: "После звонка сохранить итог и самоанализ.",
+      importance: 4,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        hasAgentState: Boolean(agentStateSummary),
+        hasCallSession: Boolean(callSession),
+        recentInteractionsCount: recentInteractions.length
+      }
+    });
 
     console.log("KUZYA LIVEKIT AGENT START:", {
       roomName: ctx.room?.name,
       phoneNumber,
+      normalizedPhone,
+      callSessionId,
       instruction,
       source: metadata.source,
       chatId: metadata.chatId,
-      userId: metadata.userId
+      userId: metadata.userId,
+      hasAgentState: Boolean(agentStateSummary),
+      hasCallSession: Boolean(callSession),
+      recentInteractionsCount: recentInteractions.length
     });
 
     const initialCtx = llm.ChatContext.empty();
