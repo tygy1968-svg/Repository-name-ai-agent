@@ -171,6 +171,44 @@ async function sbGetCallSession(callSessionId) {
   }
 }
 
+async function sbUpdateCallSession(callSessionId, patch = {}) {
+  if (!hasSupabase() || !callSessionId) return null;
+
+  try {
+    const res = await fetch(
+      `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify({
+          ...patch,
+          updated_at: new Date().toISOString()
+        })
+      }
+    );
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("KUZYA_CALL_SESSION_UPDATE_ERROR:", res.status, text);
+      return null;
+    }
+
+    try {
+      const data = JSON.parse(text);
+      return Array.isArray(data) ? data[0] : null;
+    } catch {
+      return null;
+    }
+  } catch (e) {
+    console.error("KUZYA_CALL_SESSION_UPDATE_EXCEPTION:", e);
+    return null;
+  }
+}
+
 async function sbGetRecentKuziaInteractions(limit = 8) {
   if (!hasSupabase()) return [];
 
@@ -462,6 +500,22 @@ export default defineAgent({
       callSession,
       recentInteractionsText
     });
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "voice_agent_started",
+        summary: "Голосовой Кузя стартовал с общим состоянием, связанной записью звонка и последними событиями общей истории.",
+        self_review: "Звонок воспринимается как часть единого Кузи между Telegram и голосовым каналом, а не как отдельный изолированный бот.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          voiceAgentStartedAt: new Date().toISOString(),
+          hasAgentState: Boolean(agentStateSummary),
+          hasCallSession: Boolean(callSession),
+          recentInteractionsCount: recentInteractions.length,
+          oneKuzyaBridge: true
+        }
+      });
+    }
 
     await sbLogKuziaInteraction({
       stimulus: instruction,
