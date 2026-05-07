@@ -29,6 +29,8 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
 const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
+const SUPABASE_KUZIA_INTERACTIONS_URL = `${SUPABASE_URL}/rest/v1/kuzia_interactions`;
+const SUPABASE_AGENT_STATE_URL = `${SUPABASE_URL}/rest/v1/agent_state`;
 
 const KUZYA_CORE = `
 Ты — Кузя.
@@ -103,6 +105,115 @@ async function tgSendMessage(chatId, text) {
 }
 
 // ---------- SUPABASE ----------
+function clipForDb(value, limit = 5000) {
+  const text = String(value || "");
+  return text.length > limit ? text.slice(0, limit) : text;
+}
+
+async function sbGetAgentState(userId = "yulia") {
+  try {
+    const res = await fetch(
+      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Supabase agent_state read error:", res.status, await res.text());
+      return "";
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0]?.summary ? data[0].summary : "";
+  } catch (e) {
+    console.error("sbGetAgentState exception:", e);
+    return "";
+  }
+}
+
+async function sbLogKuziaInteraction({
+  userId = "yulia",
+  stimulus = "",
+  response = "",
+  evolutionLevel = 1.0,
+  channel = "telegram",
+  direction = "incoming",
+  eventType = "interaction",
+  sessionId = null,
+  callSessionId = null,
+  telegramChatId = null,
+  telegramUserId = null,
+  normalizedPhone = null,
+  summary = "",
+  selfReview = "",
+  nextAction = "",
+  importance = 0,
+  metadata = {}
+} = {}) {
+  try {
+    const payload = [
+      {
+        user_id: String(userId || "yulia"),
+        stimulus: clipForDb(stimulus),
+        response: clipForDb(response),
+        evolution_level: evolutionLevel,
+        timestamp: new Date().toISOString(),
+
+        channel,
+        direction,
+        event_type: eventType,
+        session_id: sessionId,
+        call_session_id: callSessionId,
+
+        telegram_chat_id: telegramChatId ? String(telegramChatId) : null,
+        telegram_user_id: telegramUserId ? String(telegramUserId) : null,
+        normalized_phone: normalizedPhone ? String(normalizedPhone) : null,
+
+        summary: clipForDb(summary),
+        self_review: clipForDb(selfReview),
+        next_action: clipForDb(nextAction),
+        importance,
+        metadata
+      }
+    ];
+
+    const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("Supabase kuzia_interactions log error:", res.status, text);
+      return false;
+    }
+
+    console.log("KUZIA_INTERACTION_LOGGED:", {
+      channel,
+      direction,
+      eventType,
+      callSessionId,
+      telegramChatId,
+      normalizedPhone
+    });
+
+    return true;
+  } catch (e) {
+    console.error("sbLogKuziaInteraction exception:", e);
+    return false;
+  }
+}
 
 // ---------- FACT CATEGORY SYSTEM ----------
 function getFactCategory(fact) {
@@ -805,6 +916,7 @@ async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
   const identity = await sbGetIdentity(userId);
+  const agentStateSummary = await sbGetAgentState("yulia");
 
   dialogHistory[userId].push({ role: "user", content: userText });
 
@@ -858,7 +970,8 @@ ${KUZYA_CORE}
       role: "system",
       content:
         systemPrompt +
-        `\n\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
+        `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
+        `\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
         `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
         `\n\nТекущее состояние диалога:\n${JSON.stringify(state)}\n\n` +
@@ -1220,6 +1333,27 @@ app.post("/webhook", async (req, res) => {
         const reply = await generateVisionReply(userId, imageUrl, memory);
 
         await tgSendMessage(chatId, reply);
+
+        await sbLogKuziaInteraction({
+          userId: "yulia",
+          stimulus: "[Пользователь отправил фото]",
+          response: reply,
+          channel: "telegram",
+          direction: "incoming",
+          eventType: "telegram_photo",
+          telegramChatId: chatId,
+          telegramUserId: userId,
+          summary: "Юля отправила фото в Telegram, Кузя проанализировал изображение и ответил.",
+          selfReview: "Фото-взаимодействие сохранено в общем журнале, чтобы оно было частью единой истории Кузи.",
+          nextAction: "",
+          importance: 2,
+          metadata: {
+            source: "telegram_webhook",
+            message_id: msg.message_id,
+            file_id: fileId
+          }
+        });
+
         return;
       }
 
@@ -1291,6 +1425,28 @@ app.post("/webhook", async (req, res) => {
             chatId,
             `📞 Кузя звонит через LiveKit\nroom: ${result.roomName}\nto: ${result.to}\nsession: ${result.callSessionId || "null"}`
           );
+
+          await sbLogKuziaInteraction({
+            userId: "yulia",
+            stimulus: text,
+            response: `Создан исходящий LiveKit-звонок на ${result.to}. session=${result.callSessionId || "null"}`,
+            channel: "outbound_call",
+            direction: "outgoing",
+            eventType: "lkcall_requested",
+            callSessionId: result.callSessionId || null,
+            telegramChatId: chatId,
+            telegramUserId: userId,
+            normalizedPhone: normalizePhoneForMemory(result.to),
+            summary: `Юля запустила исходящий звонок через Telegram. Инструкция звонка: ${instruction}`,
+            selfReview: "Этот звонок должен восприниматься Кузей как продолжение Telegram-задачи, а не как отдельный изолированный эпизод.",
+            nextAction: "После завершения звонка записать итог звонка и самоанализ.",
+            importance: 4,
+            metadata: {
+              source: "telegram_lkcall",
+              roomName: result.roomName,
+              to: result.to
+            }
+          });
         } catch (err) {
           console.error("LiveKit outbound call error:", err);
           await tgSendMessage(
@@ -1467,6 +1623,25 @@ app.post("/webhook", async (req, res) => {
       const reply = await generateReply(userId, text, memory);
 
       await tgSendMessage(chatId, reply);
+
+      await sbLogKuziaInteraction({
+        userId: "yulia",
+        stimulus: text,
+        response: reply,
+        channel: "telegram",
+        direction: "incoming",
+        eventType: "telegram_message",
+        telegramChatId: chatId,
+        telegramUserId: userId,
+        summary: dialogState[userId]?.summary || "Telegram-диалог Юли с Кузей.",
+        selfReview: "Кузя ответил в Telegram. Это взаимодействие сохранено как часть единой истории между Telegram, звонками и будущими входящими.",
+        nextAction: dialogState[userId]?.openLoop || "",
+        importance: 1,
+        metadata: {
+          source: "telegram_webhook",
+          message_id: msg.message_id
+        }
+      });
     } catch (e) {
       console.error("handler error", e);
       await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
