@@ -21,6 +21,10 @@ const SUPABASE_CALL_SESSIONS_URL = SUPABASE_URL
   ? `${SUPABASE_URL}/rest/v1/call_sessions`
   : "";
 
+const SUPABASE_KUZIA_EVOLUTION_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/kuzia_evolution`
+  : "";
+
 const KUZYA_OWNER_USER_ID = "yulia";
 
 const KUZYA_INSTRUCTIONS = `
@@ -341,6 +345,40 @@ async function sbLogKuziaInteraction({
     return true;
   } catch (e) {
     console.error("KUZYA_INTERACTION_WRITE_EXCEPTION:", e);
+    return false;
+  }
+}
+
+async function sbLogKuziaEvolution(change) {
+  if (!hasSupabase()) return false;
+
+  try {
+    const res = await fetch(SUPABASE_KUZIA_EVOLUTION_URL, {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify([
+        {
+          user_id: KUZYA_OWNER_USER_ID,
+          change: clipText(change, 5000),
+          timestamp: new Date().toISOString()
+        }
+      ])
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("KUZYA_EVOLUTION_WRITE_ERROR:", res.status, text);
+      return false;
+    }
+
+    console.log("KUZYA_EVOLUTION_WRITTEN");
+    return true;
+  } catch (e) {
+    console.error("KUZYA_EVOLUTION_WRITE_EXCEPTION:", e);
     return false;
   }
 }
@@ -880,6 +918,22 @@ ${instruction}
         participantAttributes: callEnd.attributes || null
       }
     });
+
+    await sbLogKuziaEvolution(
+      callEnd.ended
+        ? [
+            "Звонок завершён корректно.",
+            "Кузя прошёл полный исходящий голосовой цикл: старт агента, получение общего контекста, ожидание поднятия трубки, active-состояние, первая реплика, завершение звонка.",
+            "Вывод: связка Telegram → call_sessions → agent.js → kuzia_interactions работает как единый контур Кузи.",
+            "Следующий слой: добавить содержательный итог разговора после появления расшифровки звонка."
+          ].join("\n")
+        : [
+            "Звонок не дал явного события завершения в пределах ожидания.",
+            "Кузя прошёл старт и первую реплику, но конец звонка был определён неуверенно.",
+            "Вывод: нужно уточнить механизм определения завершения звонка через LiveKit/SIP.",
+            "Следующий слой: проверить call_end_wait_timeout и способ закрытия комнаты."
+          ].join("\n")
+    );
   }
 });
 
