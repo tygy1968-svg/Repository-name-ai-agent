@@ -584,7 +584,14 @@ export default defineAgent({
       attributes: participant.attributes
     });
 
-    await waitForSipActive(ctx, participant);
+    console.log("KUZYA BEFORE WAIT_FOR_SIP_ACTIVE");
+
+    const activeParticipant = await waitForSipActive(ctx, participant);
+
+    console.log("KUZYA AFTER WAIT_FOR_SIP_ACTIVE", {
+      identity: activeParticipant?.identity,
+      attributes: activeParticipant?.attributes
+    });
 
     if (callSessionId) {
       await sbUpdateCallSession(callSessionId, {
