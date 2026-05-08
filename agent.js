@@ -6,8 +6,13 @@ console.log("AGENT_VERSION: one_kuzya_context_bridge_2026_05_07");
 
 const {
   SUPABASE_URL,
-  SUPABASE_KEY
+  SUPABASE_KEY,
+  TELEGRAM_TOKEN
 } = process.env;
+
+const TELEGRAM_API = TELEGRAM_TOKEN
+  ? `https://api.telegram.org/bot${TELEGRAM_TOKEN}`
+  : "";
 
 const SUPABASE_AGENT_STATE_URL = SUPABASE_URL
   ? `${SUPABASE_URL}/rest/v1/agent_state`
@@ -379,6 +384,34 @@ async function sbLogKuziaEvolution(change) {
     return true;
   } catch (e) {
     console.error("KUZYA_EVOLUTION_WRITE_EXCEPTION:", e);
+    return false;
+  }
+}
+
+async function tgSendMessage(chatId, text) {
+  if (!TELEGRAM_TOKEN || !chatId) return false;
+
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: String(chatId),
+        text: clipText(text, 3500)
+      })
+    });
+
+    if (!res.ok) {
+      console.error("KUZYA_TELEGRAM_SEND_ERROR:", res.status, await res.text());
+      return false;
+    }
+
+    console.log("KUZYA_TELEGRAM_STATUS_SENT");
+    return true;
+  } catch (e) {
+    console.error("KUZYA_TELEGRAM_SEND_EXCEPTION:", e);
     return false;
   }
 }
@@ -932,6 +965,23 @@ ${instruction}
             "Кузя прошёл старт и первую реплику, но конец звонка был определён неуверенно.",
             "Вывод: нужно уточнить механизм определения завершения звонка через LiveKit/SIP.",
             "Следующий слой: проверить call_end_wait_timeout и способ закрытия комнаты."
+          ].join("\n")
+    );
+
+    await tgSendMessage(
+      metadata.chatId,
+      callEnd.ended
+        ? [
+            "📞 Звонок завершён.",
+            `Номер: ${phoneNumber || "не передан"}`,
+            "Статус: трубку подняли, первая реплика отправлена, звонок завершён.",
+            "Кузя записал событие и self-review."
+          ].join("\n")
+        : [
+            "⚠️ Звонок не дал явного сигнала завершения.",
+            `Номер: ${phoneNumber || "не передан"}`,
+            "Кузя записал это как call_end_wait_timeout.",
+            "Нужно будет проверить механизм завершения звонка."
           ].join("\n")
     );
   }
