@@ -215,6 +215,156 @@ async function sbLogKuziaInteraction({
   }
 }
 
+async function sbGetRecentKuziaInteractionsForContext(limit = 10) {
+  try {
+    const select = [
+      "timestamp",
+      "channel",
+      "direction",
+      "event_type",
+      "summary",
+      "self_review",
+      "next_action",
+      "normalized_phone",
+      "call_session_id",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.yulia&select=${select}&order=timestamp.desc&limit=${limit}`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Context interactions read error:", res.status, await res.text());
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("sbGetRecentKuziaInteractionsForContext exception:", e);
+    return [];
+  }
+}
+
+async function sbGetRecentCallSessionsForContext(limit = 8) {
+  try {
+    const select = [
+      "id",
+      "created_at",
+      "direction",
+      "status",
+      "phone_number",
+      "normalized_phone",
+      "instruction",
+      "summary",
+      "self_review",
+      "source",
+      "related_call_session_id",
+      "relation_type",
+      "linked_reason"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_CALL_SESSIONS_URL}?select=${select}&order=created_at.desc&limit=${limit}`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Context call_sessions read error:", res.status, await res.text());
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("sbGetRecentCallSessionsForContext exception:", e);
+    return [];
+  }
+}
+
+function formatInteractionsForContext(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return "нет последних событий";
+
+  return items
+    .slice(0, 10)
+    .map((item, index) => {
+      const parts = [
+        `${index + 1}. ${item.channel || "unknown"} / ${item.event_type || "interaction"} / ${item.direction || "unknown"}`,
+        item.summary ? `Смысл: ${clipForDb(item.summary, 500)}` : "",
+        item.next_action ? `Незакрыто: ${clipForDb(item.next_action, 300)}` : "",
+        item.self_review ? `Self-review: ${clipForDb(item.self_review, 300)}` : "",
+        item.normalized_phone ? `Телефон: ${item.normalized_phone}` : ""
+      ].filter(Boolean);
+
+      return parts.join("\n");
+    })
+    .join("\n\n");
+}
+
+function formatCallSessionsForContext(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return "нет последних звонков";
+
+  return items
+    .slice(0, 8)
+    .map((item, index) => {
+      const linked = item.related_call_session_id
+        ? `Связь: ${item.relation_type || "linked"} → ${item.related_call_session_id}`
+        : "Связь: нет";
+
+      const parts = [
+        `${index + 1}. ${item.direction || "unknown"} / ${item.status || "unknown"} / ${item.source || "unknown"}`,
+        item.normalized_phone ? `Телефон: ${item.normalized_phone}` : "",
+        item.instruction ? `Инструкция: ${clipForDb(item.instruction, 500)}` : "",
+        item.summary ? `Итог: ${clipForDb(item.summary, 500)}` : "",
+        linked,
+        item.linked_reason ? `Причина связи: ${clipForDb(item.linked_reason, 300)}` : ""
+      ].filter(Boolean);
+
+      return parts.join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildOneKuzyaContextPacket({
+  recentInteractions = [],
+  recentCallSessions = []
+} = {}) {
+  const openActions = recentInteractions
+    .map(item => item?.next_action)
+    .filter(Boolean)
+    .slice(0, 5);
+
+  return `
+ПОСЛЕДНИЕ СОБЫТИЯ КУЗИ:
+${formatInteractionsForContext(recentInteractions)}
+
+ПОСЛЕДНИЕ ЗВОНКИ И СВЯЗИ:
+${formatCallSessionsForContext(recentCallSessions)}
+
+НЕЗАКРЫТЫЕ ДЕЙСТВИЯ:
+${openActions.length > 0 ? openActions.map((a, i) => `${i + 1}. ${a}`).join("\n") : "нет явно открытых действий"}
+
+ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ КОНТЕКСТА:
+— используй это как внутренний контекст;
+— не произноси названия таблиц, session, Supabase, LiveKit, логи;
+— отвечай как один и тот же Кузя, который помнит Telegram, исходящие и входящие;
+— если видишь связанную inbound/outbound линию, понимай её как продолжение контакта;
+— если данных мало, честно скажи, чего не хватает.
+`;
+}
+
 // ---------- FACT CATEGORY SYSTEM ----------
 function getFactCategory(fact) {
   const f = String(fact || "").toLowerCase();
@@ -1022,6 +1172,16 @@ async function generateReply(userId, userText, memory) {
   const identity = await sbGetIdentity(userId);
   const agentStateSummary = await sbGetAgentState("yulia");
 
+  const [recentKuziaInteractions, recentCallSessions] = await Promise.all([
+    sbGetRecentKuziaInteractionsForContext(10),
+    sbGetRecentCallSessionsForContext(8)
+  ]);
+
+  const oneKuzyaContext = buildOneKuzyaContextPacket({
+    recentInteractions: recentKuziaInteractions,
+    recentCallSessions
+  });
+
   dialogHistory[userId].push({ role: "user", content: userText });
 
   if (dialogHistory[userId].length > 30) {
@@ -1075,6 +1235,7 @@ ${KUZYA_CORE}
       content:
         systemPrompt +
         `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
+        `\n\nЕДИНЫЙ КОНТЕКСТ КУЗИ:\n${oneKuzyaContext || "нет"}\n` +
         `\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
         `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
