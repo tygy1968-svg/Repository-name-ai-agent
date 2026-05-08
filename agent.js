@@ -62,9 +62,31 @@ const KUZYA_INSTRUCTIONS = `
 — не зацикливайся на исходной инструкции
 — после первой фразы слушай человека и отвечай по ситуации
 
-Если с тобой попрощались словами "пока", "до свидания", "бувай", "до зустрічі", "всё, спасибо", "ладно, давай" или явно хотят завершить разговор:
+Завершение звонка:
+
+НЕ завершай звонок сам только потому, что задача выполнена.
+НЕ завершай звонок после паузы.
+НЕ завершай звонок после слов "спасибо", "хорошо", "понятно", "ладно", если человек явно не прощается.
+НЕ вызывай endCall после окончания сказки, объяснения или ответа — сначала дай человеку возможность продолжить.
+
+Вызывай endCall только если собеседник явно завершает разговор:
+— "пока"
+— "до свидания"
+— "бувай"
+— "до побачення"
+— "до зустрічі"
+— "всё, пока"
+— "всё, до свидания"
+— "дякую, бувай"
+— "спасибо, до свидания"
+
+Если задача закончена, но прощания не было, скажи коротко:
+"Готово. Я ещё на связи."
+или по-украински:
+"Готово. Я ще на звʼязку."
+
+Если с тобой явно попрощались:
 — коротко попрощайся в ответ;
-— не задавай вопросов после прощания;
 — сразу вызови инструмент endCall;
 — после этого ничего не продолжай.
 
@@ -737,7 +759,7 @@ export default defineAgent({
 
     const endCall = llm.tool({
       description:
-        "Physically end the current phone call after the caller clearly says goodbye or wants to finish the conversation.",
+        "Physically end the current phone call ONLY after the caller explicitly says goodbye, such as пока, до свидания, бувай, до побачення, or clearly asks to end the call. Do not use this tool merely because the task is completed, after a pause, or after спасибо/хорошо/ладно without an explicit goodbye.",
       parameters: z.object({
         reason: z.string().optional()
       }),
@@ -850,7 +872,7 @@ export default defineAgent({
             normalizedPhone,
             summary: "Физическое завершение звонка не удалось.",
             selfReview: "Нужно проверить LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET или права RoomServiceClient.",
-            nextAction: "Проверить Render logs по KUZYA_END_CALL_DELETE_ROOM_ERROR.",
+            nextAction: "Проверить Render logs по KУZYA_END_CALL_DELETE_ROOM_ERROR.",
             importance: 4,
             metadata: {
               source: metadata.source || "unknown",
@@ -1025,7 +1047,8 @@ export default defineAgent({
 Не повторяйся.
 Не говори технические слова.
 Не говори про базу, session, Supabase, call_sessions, LiveKit, Zadarma или логи.
-Если собеседник прощается, попрощайся коротко, вызови endCall и больше ничего не говори.
+Если собеседник явно прощается словами "пока", "до свидания", "бувай", "до побачення" — коротко попрощайся и вызови endCall.
+Если задача выполнена, но явного прощания нет — не завершай звонок сам, скажи коротко, что ты ещё на связи.
 
 Если собеседник отвечает по-украински, дальше говори по-украински.
 Если собеседник отвечает по-русски, говори по-русски.
