@@ -1,5 +1,7 @@
 import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
+import { RoomServiceClient } from "livekit-server-sdk";
+import { z } from "zod";
 import { fileURLToPath } from "node:url";
 
 console.log("AGENT_VERSION: one_kuzya_context_bridge_2026_05_07");
@@ -60,7 +62,11 @@ const KUZYA_INSTRUCTIONS = `
 — не зацикливайся на исходной инструкции
 — после первой фразы слушай человека и отвечай по ситуации
 
-Если с тобой попрощались, коротко попрощайся в ответ и заканчивай разговор. Не задавай вопросов после прощания.
+Если с тобой попрощались словами "пока", "до свидания", "бувай", "до зустрічі", "всё, спасибо", "ладно, давай" или явно хотят завершить разговор:
+— коротко попрощайся в ответ;
+— не задавай вопросов после прощания;
+— сразу вызови инструмент endCall;
+— после этого ничего не продолжай.
 
 Запрещено говорить:
 — "записал в базу"
@@ -130,6 +136,25 @@ function clipText(value, limit = 2500) {
 
 function normalizePhoneForMemory(phone) {
   return String(phone || "").replace(/[^\d]/g, "");
+}
+
+function getLiveKitHttpUrl() {
+  const url = String(process.env.LIVEKIT_URL || "").trim();
+
+  if (!url) return "";
+
+  return url
+    .replace(/^wss:\/\//i, "https://")
+    .replace(/^ws:\/\//i, "http://");
+}
+
+async function withTimeout(promise, ms, label) {
+  return await Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    )
+  ]);
 }
 
 async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
@@ -592,10 +617,11 @@ async function waitForCallEnd(ctx, participant, timeoutMs = 15 * 60 * 1000) {
 }
 
 class KuzyaAgent extends voice.Agent {
-  constructor(chatCtx, instructions) {
+  constructor(chatCtx, instructions, tools = {}) {
     super({
       chatCtx,
-      instructions
+      instructions,
+      tools
     });
   }
 }
@@ -696,9 +722,157 @@ export default defineAgent({
       })
     });
 
+    const livekitHttpUrl = getLiveKitHttpUrl();
+
+    const roomService =
+      livekitHttpUrl && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
+        ? new RoomServiceClient(
+            livekitHttpUrl,
+            process.env.LIVEKIT_API_KEY,
+            process.env.LIVEKIT_API_SECRET
+          )
+        : null;
+
+    let hangupStarted = false;
+
+    const endCall = llm.tool({
+      description:
+        "Physically end the current phone call after the caller clearly says goodbye or wants to finish the conversation.",
+      parameters: z.object({
+        reason: z.string().optional()
+      }),
+      execute: async ({ reason }) => {
+        if (hangupStarted) {
+          return {
+            ok: true,
+            alreadyStarted: true
+          };
+        }
+
+        hangupStarted = true;
+
+        await sbLogKuziaInteraction({
+          stimulus: "Farewell detected. endCall tool invoked.",
+          response: "Кузя получил сигнал завершить разговор и начал физическое завершение звонка.",
+          channel: "outbound_call",
+          direction: "internal",
+          eventType: "hangup_requested",
+          callSessionId: callSessionId || null,
+          telegramChatId: metadata.chatId || null,
+          telegramUserId: metadata.userId || null,
+          normalizedPhone,
+          summary: "Кузя вызвал endCall после прощания собеседника.",
+          selfReview: "Это первый слой физического завершения звонка после речевого прощания.",
+          nextAction: "Удалить LiveKit room через RoomServiceClient.deleteRoom.",
+          importance: 4,
+          metadata: {
+            source: metadata.source || "unknown",
+            roomName: ctx.room?.name || null,
+            phoneNumber,
+            reason: reason || "farewell"
+          }
+        });
+
+        if (callSessionId) {
+          await sbUpdateCallSession(callSessionId, {
+            status: "hangup_requested",
+            summary: "Кузя получил прощание и начал физическое завершение звонка.",
+            self_review: "endCall вызван после прощания. Следующий шаг — удалить LiveKit room.",
+            metadata: {
+              ...(callSession?.metadata || {}),
+              hangupRequestedAt: new Date().toISOString(),
+              hangupReason: reason || "farewell",
+              oneKuzyaBridge: true
+            }
+          });
+        }
+
+        await sleep(1000);
+
+        if (!roomService || !ctx.room?.name) {
+          console.error("KUZYA_END_CALL_NO_ROOM_SERVICE_OR_ROOM", {
+            hasRoomService: Boolean(roomService),
+            roomName: ctx.room?.name || null
+          });
+
+          return {
+            ok: false,
+            error: "room_service_or_room_missing"
+          };
+        }
+
+        try {
+          await withTimeout(
+            roomService.deleteRoom(ctx.room.name),
+            5000,
+            "LiveKit deleteRoom"
+          );
+
+          await sbLogKuziaInteraction({
+            stimulus: "LiveKit room deleted by endCall.",
+            response: "Кузя физически завершил звонок через удаление LiveKit room.",
+            channel: "outbound_call",
+            direction: "internal",
+            eventType: "physical_hangup_completed",
+            callSessionId: callSessionId || null,
+            telegramChatId: metadata.chatId || null,
+            telegramUserId: metadata.userId || null,
+            normalizedPhone,
+            summary: "LiveKit room удалена, звонок физически завершён.",
+            selfReview: "Кузя не просто замолчал после прощания, а выполнил физическое завершение звонка.",
+            nextAction: "",
+            importance: 5,
+            metadata: {
+              source: metadata.source || "unknown",
+              roomName: ctx.room?.name || null,
+              phoneNumber,
+              reason: reason || "farewell"
+            }
+          });
+
+          return {
+            ok: true,
+            action: "room_deleted",
+            room: ctx.room.name
+          };
+        } catch (e) {
+          console.error("KUZYA_END_CALL_DELETE_ROOM_ERROR:", e);
+
+          await sbLogKuziaInteraction({
+            stimulus: "LiveKit deleteRoom failed.",
+            response: "Кузя попытался физически завершить звонок, но deleteRoom вернул ошибку.",
+            channel: "outbound_call",
+            direction: "internal",
+            eventType: "physical_hangup_failed",
+            callSessionId: callSessionId || null,
+            telegramChatId: metadata.chatId || null,
+            telegramUserId: metadata.userId || null,
+            normalizedPhone,
+            summary: "Физическое завершение звонка не удалось.",
+            selfReview: "Нужно проверить LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET или права RoomServiceClient.",
+            nextAction: "Проверить Render logs по KUZYA_END_CALL_DELETE_ROOM_ERROR.",
+            importance: 4,
+            metadata: {
+              source: metadata.source || "unknown",
+              roomName: ctx.room?.name || null,
+              phoneNumber,
+              error: e?.message || String(e)
+            }
+          });
+
+          return {
+            ok: false,
+            error: e?.message || String(e)
+          };
+        }
+      }
+    });
+
     await session.start({
       room: ctx.room,
-      agent: new KuzyaAgent(initialCtx, runtimeInstructions)
+      agent: new KuzyaAgent(initialCtx, runtimeInstructions, {
+        endCall
+      })
     });
 
     let participant;
@@ -851,7 +1025,7 @@ export default defineAgent({
 Не повторяйся.
 Не говори технические слова.
 Не говори про базу, session, Supabase, call_sessions, LiveKit, Zadarma или логи.
-Если собеседник прощается, попрощайся коротко и больше ничего не говори.
+Если собеседник прощается, попрощайся коротко, вызови endCall и больше ничего не говори.
 
 Если собеседник отвечает по-украински, дальше говори по-украински.
 Если собеседник отвечает по-русски, говори по-русски.
