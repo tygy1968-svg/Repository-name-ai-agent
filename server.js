@@ -2243,23 +2243,48 @@ async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, use
   return zadarmaGet("/v1/request/callback/", callbackParams);
 }
 
-function getRealtimeCallContext() {
+function getSipHeaderValue(event, headerName) {
+  const headers = event?.data?.sip_headers;
+
+  if (!Array.isArray(headers)) return "";
+
+  const found = headers.find(
+    h => String(h?.name || "").toLowerCase() === String(headerName).toLowerCase()
+  );
+
+  return found?.value ? String(found.value) : "";
+}
+
+function extractPhoneFromSipHeaderValue(value) {
+  const text = String(value || "");
+
+  const sipMatch = text.match(/sip:(\+?\d{7,15})@/i);
+  if (sipMatch) {
+    return normalizeZadarmaPhone(sipMatch[1]);
+  }
+
+  const looseMatch = text.match(/(\+?\d[\d\s().-]{7,}\d)/);
+  if (looseMatch) {
+    return normalizeZadarmaPhone(looseMatch[1]);
+  }
+
+  return "";
+}
+
+function extractIncomingPhoneFromRealtimeEvent(event) {
+  const fromHeader = getSipHeaderValue(event, "From");
+  return extractPhoneFromSipHeaderValue(fromHeader);
+}
+
+function getRealtimeCallContext({ incomingPhone = "", inboundLink = null } = {}) {
   const pending = pendingRealtimeOutboundCall;
   const isFresh =
     pending &&
     pending.createdAt &&
     Date.now() - pending.createdAt < 3 * 60 * 1000;
 
-  if (!isFresh) {
+  if (isFresh) {
     return `
-Это входящий звонок.
-Человек сам позвонил Кузе.
-Начни живо и коротко.
-Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
-`;
-  }
-
-  return `
 Это исходящий звонок, который Юля запустила из Telegram.
 
 Кому звоним:
@@ -2274,6 +2299,69 @@ ${pending.instruction || "нет отдельной инструкции"}
 — не говори технические детали
 — говори коротко, живо и уверенно
 — если человек не понимает, кто звонит, объясни: "Это Кузя, я звоню по просьбе Юли"
+`;
+  }
+
+  const relatedOutbound = inboundLink?.relatedOutbound || null;
+  const inbound = inboundLink?.inbound || null;
+
+  if (incomingPhone && relatedOutbound) {
+    return `
+Это входящий звонок.
+Человек сам перезвонил Кузе.
+
+Номер входящего:
+${incomingPhone}
+
+Этот входящий звонок связан с прошлым исходящим звонком.
+
+Связанная inbound call_session:
+${inbound?.id || "не создана"}
+
+Связанный прошлый outbound call_session:
+${relatedOutbound.id}
+
+Прошлая задача исходящего звонка:
+${relatedOutbound.instruction || "не указана"}
+
+Что это значит:
+— это не новый изолированный звонок;
+— воспринимай его как продолжение предыдущего контакта;
+— не начинай как оператор;
+— коротко поздоровайся;
+— если человек говорит по делу, продолжай контекст прошлого звонка;
+— если неясно, зачем человек перезвонил, коротко спроси: "Да, слушаю, что передать Юле?"
+— не говори технические слова, таблицы, session, базу, LiveKit или Supabase.
+`;
+  }
+
+  if (incomingPhone) {
+    return `
+Это входящий звонок.
+Человек сам позвонил Кузе.
+
+Номер входящего:
+${incomingPhone}
+
+Связанного прошлого исходящего звонка по этому номеру не найдено.
+
+Правила:
+— начни живо и коротко;
+— не веди себя как оператор;
+— если это Юля — говори по-человечески;
+— если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле;
+— не говори технические детали.
+`;
+  }
+
+  return `
+Это входящий звонок.
+Человек сам позвонил Кузе.
+Номер входящего не удалось определить из SIP headers.
+
+Начни живо и коротко.
+Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
+Если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле.
 `;
 }
 
@@ -2296,7 +2384,83 @@ app.post("/openai-realtime-webhook", async (req, res) => {
       return res.status(200).json({ ok: false, error: "missing_call_id" });
     }
 
-    const callContext = getRealtimeCallContext();
+    const incomingPhone = extractIncomingPhoneFromRealtimeEvent(event);
+    let inboundLink = null;
+
+    try {
+      if (incomingPhone) {
+        inboundLink = await sbCreateLinkedInboundCallSession({
+          phoneNumber: incomingPhone,
+          chatId: null,
+          userId: null,
+          source: "openai-realtime-inbound",
+          metadata: {
+            openaiCallId: callId,
+            realtimeEventId: event?.id || null,
+            sipFrom: getSipHeaderValue(event, "From"),
+            sipTo: getSipHeaderValue(event, "To"),
+            testOnly: false
+          }
+        });
+
+        await sbLogKuziaInteraction({
+          userId: "yulia",
+          stimulus: "OpenAI realtime incoming SIP call.",
+          response: inboundLink?.relatedOutbound
+            ? `Настоящий входящий звонок связан с outbound ${inboundLink.relatedOutbound.id}.`
+            : "Настоящий входящий звонок создан без найденного outbound.",
+          channel: "inbound_call",
+          direction: "incoming",
+          eventType: inboundLink?.relatedOutbound
+            ? "real_inbound_linked_to_outbound"
+            : "real_inbound_created_unlinked",
+          callSessionId: inboundLink?.inbound?.id || null,
+          normalizedPhone: normalizePhoneForMemory(incomingPhone),
+          summary: inboundLink?.relatedOutbound
+            ? "Настоящий входящий звонок связан с последним исходящим по normalized_phone."
+            : "Настоящий входящий звонок создан, но предыдущий исходящий по номеру не найден.",
+          selfReview: inboundLink?.relatedOutbound
+            ? "Кузя сможет воспринимать этот входящий как продолжение предыдущего исходящего звонка."
+            : "Для этого входящего пока нет связанного исходящего контекста.",
+          nextAction: "Передать связанный контекст в realtime instructions.",
+          importance: 5,
+          metadata: {
+            openaiCallId: callId,
+            inboundCallSessionId: inboundLink?.inbound?.id || null,
+            relatedOutboundId: inboundLink?.relatedOutbound?.id || null,
+            sipFrom: getSipHeaderValue(event, "From"),
+            sipTo: getSipHeaderValue(event, "To")
+          }
+        });
+
+        const notifyChatId = inboundLink?.relatedOutbound?.telegram_chat_id;
+
+        if (notifyChatId) {
+          await tgSendMessage(
+            notifyChatId,
+            inboundLink.relatedOutbound
+              ? [
+                  "☎️ Входящий звонок связан с прошлым исходящим.",
+                  `Номер: ${incomingPhone}`,
+                  `Inbound session: ${inboundLink.inbound?.id || "null"}`,
+                  `Связан с outbound: ${inboundLink.relatedOutbound.id}`
+                ].join("\n")
+              : [
+                  "☎️ Входящий звонок получен.",
+                  `Номер: ${incomingPhone}`,
+                  "Связанный прошлый исходящий не найден."
+                ].join("\n")
+          );
+        }
+      }
+    } catch (e) {
+      console.error("REAL_INBOUND_LINK_ERROR:", e);
+    }
+
+    const callContext = getRealtimeCallContext({
+      incomingPhone,
+      inboundLink
+    });
 
     const acceptBody = {
       type: "realtime",
@@ -2365,7 +2529,14 @@ ${callContext}
       pendingRealtimeOutboundCall.callId = callId;
     }
 
-    return res.status(200).json({ ok: true, accepted: true, callId });
+    return res.status(200).json({
+      ok: true,
+      accepted: true,
+      callId,
+      incomingPhone: incomingPhone || null,
+      inboundCallSessionId: inboundLink?.inbound?.id || null,
+      relatedOutboundId: inboundLink?.relatedOutbound?.id || null
+    });
   } catch (e) {
     console.error("OpenAI realtime webhook exception:", e);
     return res.status(200).json({ ok: false, error: "exception" });
