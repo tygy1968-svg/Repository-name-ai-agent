@@ -584,13 +584,52 @@ export default defineAgent({
       attributes: participant.attributes
     });
 
-    console.log("KUZYA BEFORE WAIT_FOR_SIP_ACTIVE");
+    await sbLogKuziaInteraction({
+      stimulus: "Before waitForSipActive.",
+      response: "Голосовой Кузя дошёл до ожидания реального поднятия трубки.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "before_wait_for_sip_active",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Кузя начал ждать sip.callStatus=active перед первой голосовой репликой.",
+      selfReview: "Диагностическая метка: код дошёл до waitForSipActive.",
+      nextAction: "Дождаться active и записать after_wait_for_sip_active.",
+      importance: 2,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        participantIdentity: participant?.identity || null,
+        participantAttributes: participant?.attributes || null
+      }
+    });
 
     const activeParticipant = await waitForSipActive(ctx, participant);
 
-    console.log("KUZYA AFTER WAIT_FOR_SIP_ACTIVE", {
-      identity: activeParticipant?.identity,
-      attributes: activeParticipant?.attributes
+    await sbLogKuziaInteraction({
+      stimulus: "After waitForSipActive.",
+      response: "waitForSipActive завершился, голосовой Кузя продолжает сценарий звонка.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "after_wait_for_sip_active",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Кузя вышел из ожидания sip.callStatus=active.",
+      selfReview: "Диагностическая метка: waitForSipActive вернулся и код пошёл дальше.",
+      nextAction: "Записать call_answered и отправить первую реплику.",
+      importance: 2,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        participantIdentity: activeParticipant?.identity || null,
+        participantAttributes: activeParticipant?.attributes || null
+      }
     });
 
     if (callSessionId) {
