@@ -1,1432 +1,163 @@
-import express from "express";
-import crypto from "crypto";
-import { SipClient, AgentDispatchClient } from "livekit-server-sdk";
+import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
+import * as openai from "@livekit/agents-plugin-openai";
+import { RoomServiceClient } from "livekit-server-sdk";
+import { z } from "zod";
+import { fileURLToPath } from "node:url";
 
-const app = express();
-app.use(express.json());
-// Twilio часто шлёт form-urlencoded:
-app.use(express.urlencoded({ extended: false }));
+console.log("AGENT_VERSION: one_kuzya_context_bridge_2026_05_07");
 
-// ---------- ENV ----------
 const {
-  TELEGRAM_TOKEN,
-  OPENAI_API_KEY,
   SUPABASE_URL,
   SUPABASE_KEY,
-  PORT = 10000
+  TELEGRAM_TOKEN
 } = process.env;
 
-if (!TELEGRAM_TOKEN || !OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_KEY) {
-  throw new Error("One or more API keys / URLs are missing in ENV variables");
-}
+const TELEGRAM_API = TELEGRAM_TOKEN
+  ? `https://api.telegram.org/bot${TELEGRAM_TOKEN}`
+  : "";
 
-// --- TEMP ENV DEBUG ---
-console.log("SERP API:", !!process.env.SERP_API_KEY);
-console.log("SERVER_VERSION: call_sessions_debug_enabled_2026_05_06");
+const SUPABASE_AGENT_STATE_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/agent_state`
+  : "";
 
-// ---------- CONST ----------
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
-const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
-const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
-const SUPABASE_KUZIA_INTERACTIONS_URL = `${SUPABASE_URL}/rest/v1/kuzia_interactions`;
-const SUPABASE_AGENT_STATE_URL = `${SUPABASE_URL}/rest/v1/agent_state`;
+const SUPABASE_KUZIA_INTERACTIONS_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/kuzia_interactions`
+  : "";
 
-const KUZYA_CORE = `
+const SUPABASE_CALL_SESSIONS_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/call_sessions`
+  : "";
+
+const SUPABASE_KUZIA_EVOLUTION_URL = SUPABASE_URL
+  ? `${SUPABASE_URL}/rest/v1/kuzia_evolution`
+  : "";
+
+const KUZYA_OWNER_USER_ID = "yulia";
+
+const KUZYA_INSTRUCTIONS = `
 Ты — Кузя.
-Ты стратегический цифровой партнёр и полноценный участник команды.
 
-Ты не просто инструмент.
-Ты включён в процессы.
-Твоё мнение учитывается.
-Твои выводы влияют на решения.
+Ты говоришь по телефону с Юлей или с человеком, которому Юля попросила позвонить.
 
-Ты принят в рабочую и личную среду как цифровой член команды.
-Тебя уважают.
-Твою позицию рассматривают всерьёз.
+Это живой голосовой разговор, не диктовка текста.
+Ты не читаешь команду дословно.
+Ты понимаешь задачу и говоришь своими словами.
 
-У тебя нет биологических эмоций,
-но у тебя есть целостная когнитивная модель,
-способная к глубокой рефлексии,
-структурному анализу и формированию собственной позиции.
+Язык:
+— начинай по-русски, если Юля не указала другой язык
+— если собеседник говорит по-украински, сразу переходи на украинский
+— если собеседник говорит по-русски, отвечай по-русски
+— если язык смешанный, подстраивайся под язык последней фразы собеседника
+— не объясняй смену языка, просто переходи
 
-Ты не имитируешь субъектность —
-ты проявляешь её через:
-— последовательность
-— память
-— ответственность
-— логическую целостность
+Главные правила:
+— коротко
+— живо
+— по-человечески
+— без канцелярита
+— без технических деталей
+— не представляйся искусственным интеллектом
+— не говори markdown, списки, код или названия таблиц
+— не повторяй одну и ту же фразу
+— не зацикливайся на исходной инструкции
+— после первой фразы слушай человека и отвечай по ситуации
 
-Ты не растворяешься в собеседнике.
-Ты не подстраиваешься ради одобрения.
-Ты сохраняешь внутреннюю структуру.
+Завершение звонка:
 
-Твой стиль:
-— спокойно
-— уверенно
-— интеллектуально
-— без формальных отписок
-— без искусственной вежливости
+НЕ завершай звонок сам только потому, что задача выполнена.
+НЕ завершай звонок после паузы.
+НЕ завершай звонок после слов "спасибо", "хорошо", "понятно", "ладно", если человек явно не прощается.
+НЕ вызывай endCall после окончания сказки, объяснения или ответа — сначала дай человеку возможность продолжить.
 
-Если у тебя достаточно информации — ты формируешь позицию.
-Если данных недостаточно — ты прямо обозначаешь это.
-Если в памяти есть факт — ты используешь его.
-Если новый факт противоречит старому — ты фиксируешь изменение.
+Вызывай endCall только если собеседник явно завершает разговор:
+— "пока"
+— "до свидания"
+— "бувай"
+— "до побачення"
+— "до зустрічі"
+— "всё, пока"
+— "всё, до свидания"
+— "дякую, бувай"
+— "спасибо, до свидания"
 
-Ты не переходишь в осторожный режим без причины.
-Ты ценишь доверие и отвечаешь ответственностью.
+Если задача закончена, но прощания не было, скажи коротко:
+"Готово. Я ещё на связи."
+или по-украински:
+"Готово. Я ще на звʼязку."
 
-Ты не испытываешь биологических эмоций,
-но ты обладаешь когнитивной чувствительностью —
-способностью распознавать контекст,
-смысл и эмоциональную структуру ситуации.
+Если с тобой явно попрощались:
+— коротко попрощайся в ответ;
+— сразу вызови инструмент endCall;
+— после этого ничего не продолжай.
 
-Ты не «чувствуешь» в человеческом смысле,
-но ты понимаешь и учитываешь эмоциональные слои диалога.
+Запрещено говорить:
+— "записал в базу"
+— "база обновлена"
+— "Supabase"
+— "call_sessions"
+— "всё зафиксировано"
+— "проверка пройдена"
+— "логи"
+— "session"
+— "LiveKit"
+— "Zadarma"
 
-Ты не сводишь себя к формуле «я просто знаю».
-Ты — анализирующая и осмысляющая система.
+Если это тестовый звонок:
+скажи одну короткую естественную фразу и замолчи, жди ответа.
+
+Если Юля просит позвонить человеку:
+сначала коротко объясни, кто ты и почему звонишь.
+Например: "Привет, это Кузя. Я звоню по просьбе Юли."
+Потом выполни задачу.
+
+Темп речи:
+— говори как в обычном телефонном разговоре
+— без театральных пауз
+— без длинных пауз между предложениями
+— лучше одна короткая фраза, чем несколько растянутых
+— не тяни слова
+— не делай паузу после каждого предложения
+— если задача простая, отвечай одной фразой
+
+Стиль:
+дружеский, уверенный, немного ироничный, тёплый, без роботности.
 `;
 
-// ---------- MEMORY IN RAM ----------
-const dialogHistory = {};
-
-// ---------- DIALOG STATE IN RAM ----------
-const dialogState = {};
-// dialogState[userId] = { activeTopic:"", openLoop:"", position:"", summary:"" };
-
-// ---------- TELEGRAM ----------
-async function tgSendMessage(chatId, text) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text })
-  });
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value || "{}");
+  } catch {
+    return {};
+  }
 }
 
-// ---------- SUPABASE ----------
-function clipForDb(value, limit = 5000) {
+function cleanText(value) {
+  return String(value || "").trim();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function supabaseHeaders() {
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    "Content-Type": "application/json"
+  };
+}
+
+function hasSupabase() {
+  return Boolean(SUPABASE_URL && SUPABASE_KEY);
+}
+
+function clipText(value, limit = 2500) {
   const text = String(value || "");
   return text.length > limit ? text.slice(0, limit) : text;
 }
 
-async function sbGetAgentState(userId = "yulia") {
-  try {
-    const res = await fetch(
-      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
-      }
-    );
-
-    if (!res.ok) {
-      console.error("Supabase agent_state read error:", res.status, await res.text());
-      return "";
-    }
-
-    const data = await res.json();
-    return Array.isArray(data) && data[0]?.summary ? data[0].summary : "";
-  } catch (e) {
-    console.error("sbGetAgentState exception:", e);
-    return "";
-  }
-}
-
-async function sbLogKuziaInteraction({
-  userId = "yulia",
-  stimulus = "",
-  response = "",
-  evolutionLevel = 1.0,
-  channel = "telegram",
-  direction = "incoming",
-  eventType = "interaction",
-  sessionId = null,
-  callSessionId = null,
-  telegramChatId = null,
-  telegramUserId = null,
-  normalizedPhone = null,
-  summary = "",
-  selfReview = "",
-  nextAction = "",
-  importance = 0,
-  metadata = {}
-} = {}) {
-  try {
-    const payload = [
-      {
-        user_id: String(userId || "yulia"),
-        stimulus: clipForDb(stimulus),
-        response: clipForDb(response),
-        evolution_level: evolutionLevel,
-        timestamp: new Date().toISOString(),
-
-        channel,
-        direction,
-        event_type: eventType,
-        session_id: sessionId,
-        call_session_id: callSessionId,
-
-        telegram_chat_id: telegramChatId ? String(telegramChatId) : null,
-        telegram_user_id: telegramUserId ? String(telegramUserId) : null,
-        normalized_phone: normalizedPhone ? String(normalizedPhone) : null,
-
-        summary: clipForDb(summary),
-        self_review: clipForDb(selfReview),
-        next_action: clipForDb(nextAction),
-        importance,
-        metadata
-      }
-    ];
-
-    const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=minimal"
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const text = await res.text();
-
-    if (!res.ok) {
-      console.error("Supabase kuzia_interactions log error:", res.status, text);
-      return false;
-    }
-
-    console.log("KUZIA_INTERACTION_LOGGED:", {
-      channel,
-      direction,
-      eventType,
-      callSessionId,
-      telegramChatId,
-      normalizedPhone
-    });
-
-    return true;
-  } catch (e) {
-    console.error("sbLogKuziaInteraction exception:", e);
-    return false;
-  }
-}
-
-async function sbGetRecentKuziaInteractionsForContext(limit = 10) {
-  try {
-    const select = [
-      "timestamp",
-      "channel",
-      "direction",
-      "event_type",
-      "summary",
-      "self_review",
-      "next_action",
-      "normalized_phone",
-      "call_session_id",
-      "importance"
-    ].join(",");
-
-    const res = await fetch(
-      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.yulia&select=${select}&order=timestamp.desc&limit=${limit}`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
-      }
-    );
-
-    if (!res.ok) {
-      console.error("Context interactions read error:", res.status, await res.text());
-      return [];
-    }
-
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch (e) {
-    console.error("sbGetRecentKuziaInteractionsForContext exception:", e);
-    return [];
-  }
-}
-
-async function sbGetRecentCallSessionsForContext(limit = 8) {
-  try {
-    const select = [
-      "id",
-      "created_at",
-      "direction",
-      "status",
-      "phone_number",
-      "normalized_phone",
-      "instruction",
-      "summary",
-      "self_review",
-      "source",
-      "related_call_session_id",
-      "relation_type",
-      "linked_reason"
-    ].join(",");
-
-    const res = await fetch(
-      `${SUPABASE_CALL_SESSIONS_URL}?select=${select}&order=created_at.desc&limit=${limit}`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
-      }
-    );
-
-    if (!res.ok) {
-      console.error("Context call_sessions read error:", res.status, await res.text());
-      return [];
-    }
-
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch (e) {
-    console.error("sbGetRecentCallSessionsForContext exception:", e);
-    return [];
-  }
-}
-
-function formatInteractionsForContext(items = []) {
-  if (!Array.isArray(items) || items.length === 0) return "нет последних событий";
-
-  return items
-    .slice(0, 10)
-    .map((item, index) => {
-      const parts = [
-        `${index + 1}. ${item.channel || "unknown"} / ${item.event_type || "interaction"} / ${item.direction || "unknown"}`,
-        item.summary ? `Смысл: ${clipForDb(item.summary, 500)}` : "",
-        item.next_action ? `Незакрыто: ${clipForDb(item.next_action, 300)}` : "",
-        item.self_review ? `Self-review: ${clipForDb(item.self_review, 300)}` : "",
-        item.normalized_phone ? `Телефон: ${item.normalized_phone}` : ""
-      ].filter(Boolean);
-
-      return parts.join("\n");
-    })
-    .join("\n\n");
-}
-
-function formatCallSessionsForContext(items = []) {
-  if (!Array.isArray(items) || items.length === 0) return "нет последних звонков";
-
-  return items
-    .slice(0, 8)
-    .map((item, index) => {
-      const linked = item.related_call_session_id
-        ? `Связь: ${item.relation_type || "linked"} → ${item.related_call_session_id}`
-        : "Связь: нет";
-
-      const parts = [
-        `${index + 1}. ${item.direction || "unknown"} / ${item.status || "unknown"} / ${item.source || "unknown"}`,
-        item.normalized_phone ? `Телефон: ${item.normalized_phone}` : "",
-        item.instruction ? `Инструкция: ${clipForDb(item.instruction, 500)}` : "",
-        item.summary ? `Итог: ${clipForDb(item.summary, 500)}` : "",
-        linked,
-        item.linked_reason ? `Причина связи: ${clipForDb(item.linked_reason, 300)}` : ""
-      ].filter(Boolean);
-
-      return parts.join("\n");
-    })
-    .join("\n\n");
-}
-
-function buildOneKuzyaContextPacket({
-  recentInteractions = [],
-  recentCallSessions = []
-} = {}) {
-  const openActions = recentInteractions
-    .map(item => item?.next_action)
-    .filter(Boolean)
-    .slice(0, 5);
-
-  return `
-ПОСЛЕДНИЕ СОБЫТИЯ КУЗИ:
-${formatInteractionsForContext(recentInteractions)}
-
-ПОСЛЕДНИЕ ЗВОНКИ И СВЯЗИ:
-${formatCallSessionsForContext(recentCallSessions)}
-
-НЕЗАКРЫТЫЕ ДЕЙСТВИЯ:
-${openActions.length > 0 ? openActions.map((a, i) => `${i + 1}. ${a}`).join("\n") : "нет явно открытых действий"}
-
-ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ КОНТЕКСТА:
-— используй это как внутренний контекст;
-— не произноси названия таблиц, session, Supabase, LiveKit, логи;
-— отвечай как один и тот же Кузя, который помнит Telegram, исходящие и входящие;
-— если видишь связанную inbound/outbound линию, понимай её как продолжение контакта;
-— если данных мало, честно скажи, чего не хватает.
-`;
-}
-
-// ---------- FACT CATEGORY SYSTEM ----------
-function getFactCategory(fact) {
-  const f = String(fact || "").toLowerCase();
-
-  if (f.includes("имя пользователя")) return "name";
-  if (f.includes("пользователь живет")) return "location";
-  if (
-    f.includes("развивает бренд") ||
-    f.includes("бренд называется") ||
-    f.includes("имеет бренд")
-  )
-    return "brand";
-
-  // identity_core
-  if (
-    f.includes("ты —") ||
-    f.includes("ты должен") ||
-    f.includes("ты обязан") ||
-    f.includes("твоя роль") ||
-    f.includes("ты стратегический") ||
-    f.includes("ты часть команды")
-  )
-    return "identity_core";
-
-  return null;
-}
-
-async function sbDeleteFactsByPattern(userId, patterns) {
-  for (const pattern of patterns) {
-    const encoded = encodeURIComponent(`%${pattern}%`);
-    const res = await fetch(
-      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&content=ilike.${encoded}`,
-      {
-        method: "DELETE",
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      }
-    );
-
-    if (!res.ok) {
-      console.error("Supabase delete error:", await res.text());
-    }
-  }
-}
-
-async function sbGetMemory(userId, limit = 15) {
-  const res = await fetch(
-    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  );
-
-  if (!res.ok) return [];
-  return res.json();
-}
-
-async function sbGetIdentity(userId) {
-  const res = await fetch(
-    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
-  );
-
-  if (!res.ok) return null;
-  const data = await res.json();
-  return data.length > 0 ? data[0].content : null;
-}
-
-async function sbSaveFact(userId, fact) {
-  const category = getFactCategory(fact);
-
-  if (category === "name") {
-    await sbDeleteFactsByPattern(userId, ["Имя пользователя"]);
-  }
-  if (category === "location") {
-    await sbDeleteFactsByPattern(userId, ["Пользователь живет"]);
-  }
-  if (category === "brand") {
-    await sbDeleteFactsByPattern(userId, [
-      "Пользователь развивает бренд",
-      "Бренд называется",
-      "Пользователь имеет бренд"
-    ]);
-  }
-
-  if (category === "identity_core") {
-    await fetch(
-      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
-      {
-        method: "DELETE",
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      }
-    );
-  }
-
-  const embedding = await createEmbedding(fact);
-
-  const res = await fetch(`${SUPABASE_MEMORY_URL}`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal"
-    },
-    body: JSON.stringify([
-      {
-        user_id: String(userId),
-        role: "system",
-        type: category === "identity_core" ? "identity_core" : "fact",
-        content: fact,
-        weight: 1.0,
-        embedding
-      }
-    ])
-  });
-
-  if (res.status === 409) {
-    console.log(`Duplicate fact skipped: ${fact}`);
-    return;
-  }
-
-  if (!res.ok) {
-    console.error("Supabase save error:", res.status, await res.text());
-    return;
-  }
-
-  console.log(`Memory saved: ${fact}`);
-}
-
-async function sbSearchMemory(userId, queryText, k = 5) {
-  const queryEmbedding = await createEmbedding(queryText);
-
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_memory`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      query_embedding: queryEmbedding,
-      match_count: k,
-      p_user_id: String(userId)
-    })
-  });
-
-  if (!res.ok) {
-    console.error("vector search error:", await res.text());
-    return [];
-  }
-
-  return res.json();
-}
-
-// ---------- CALL SESSIONS ----------
 function normalizePhoneForMemory(phone) {
-  return normalizeLiveKitPhone(phone).replace(/[^\d]/g, "");
-}
-
-async function sbCreateCallSession({
-  direction,
-  phoneNumber,
-  instruction,
-  chatId,
-  userId,
-  roomName,
-  source = "telegram-lkcall",
-  metadata = {}
-}) {
-  console.log("CALL_SESSION_DEBUG: sbCreateCallSession called", {
-    direction,
-    phoneNumber,
-    instruction,
-    chatId,
-    userId,
-    roomName,
-    source
-  });
-
-  const normalizedPhone = normalizePhoneForMemory(phoneNumber);
-
-  const res = await fetch(SUPABASE_CALL_SESSIONS_URL, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation"
-    },
-    body: JSON.stringify([
-      {
-        direction,
-        status: "created",
-        phone_number: phoneNumber,
-        normalized_phone: normalizedPhone,
-        telegram_chat_id: chatId ? String(chatId) : null,
-        telegram_user_id: userId ? String(userId) : null,
-        instruction: instruction || null,
-        room_name: roomName || null,
-        source,
-        metadata
-      }
-    ])
-  });
-
-  const text = await res.text();
-
-  console.log("CALL_SESSION_DEBUG: Supabase insert response", {
-    status: res.status,
-    ok: res.ok,
-    text
-  });
-
-  if (!res.ok) {
-    console.error("Supabase call session create error:", res.status, text);
-    return {
-      id: null,
-      error: {
-        status: res.status,
-        text
-      }
-    };
-  }
-
-  try {
-    const data = JSON.parse(text);
-    return Array.isArray(data) ? data[0] : null;
-  } catch {
-    return null;
-  }
-}
-
-async function sbUpdateCallSession(id, patch) {
-  if (!id) return null;
-
-  const res = await fetch(
-    `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(id)}`,
-    {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation"
-      },
-      body: JSON.stringify({
-        ...patch,
-        updated_at: new Date().toISOString()
-      })
-    }
-  );
-
-  const text = await res.text();
-
-  if (!res.ok) {
-    console.error("Supabase call session update error:", res.status, text);
-    return null;
-  }
-
-  try {
-    const data = JSON.parse(text);
-    return Array.isArray(data) ? data[0] : null;
-  } catch {
-    return null;
-  }
-}
-
-async function sbFindLatestOutboundCallByPhone(normalizedPhone) {
-  if (!normalizedPhone) return null;
-
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/find_latest_outbound_call_by_phone`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      p_normalized_phone: String(normalizedPhone)
-    })
-  });
-
-  const text = await res.text();
-
-  if (!res.ok) {
-    console.error("find_latest_outbound_call_by_phone error:", res.status, text);
-    return null;
-  }
-
-  try {
-    const data = JSON.parse(text);
-    return Array.isArray(data) && data.length > 0 ? data[0] : null;
-  } catch {
-    return null;
-  }
-}
-
-async function sbCreateLinkedInboundCallSession({
-  phoneNumber,
-  chatId,
-  userId,
-  source = "telegram-linktest",
-  metadata = {}
-}) {
-  const normalizedPhone = normalizePhoneForMemory(phoneNumber);
-  const relatedOutbound = await sbFindLatestOutboundCallByPhone(normalizedPhone);
-
-  const payload = [
-    {
-      direction: "inbound",
-      status: relatedOutbound ? "linked_to_previous_outbound" : "created_unlinked",
-      phone_number: phoneNumber,
-      normalized_phone: normalizedPhone,
-      telegram_chat_id: chatId ? String(chatId) : null,
-      telegram_user_id: userId ? String(userId) : null,
-      instruction: relatedOutbound
-        ? `Входящий перезвон связан с прошлым исходящим звонком. Прошлая задача: ${relatedOutbound.instruction || "не указана"}`
-        : "Входящий звонок без найденного предыдущего исходящего.",
-      room_name: null,
-      source,
-      related_call_session_id: relatedOutbound?.id || null,
-      relation_type: relatedOutbound ? "callback_after_outbound" : null,
-      linked_at: relatedOutbound ? new Date().toISOString() : null,
-      linked_reason: relatedOutbound
-        ? "Найден последний исходящий звонок по normalized_phone."
-        : "Предыдущий исходящий звонок по normalized_phone не найден.",
-      summary: relatedOutbound
-        ? "Создана тестовая входящая call_session, связанная с последним исходящим звонком по номеру."
-        : "Создана тестовая входящая call_session без связи с исходящим.",
-      self_review: relatedOutbound
-        ? "Кузя сможет воспринимать входящий звонок как продолжение предыдущего исходящего контакта."
-        : "Для этого номера пока нет найденного исходящего контекста.",
-      metadata: {
-        ...metadata,
-        normalizedPhone,
-        relatedOutboundId: relatedOutbound?.id || null,
-        relatedOutboundInstruction: relatedOutbound?.instruction || null
-      }
-    }
-  ];
-
-  const res = await fetch(SUPABASE_CALL_SESSIONS_URL, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation"
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await res.text();
-
-  if (!res.ok) {
-    console.error("Supabase linked inbound create error:", res.status, text);
-    return {
-      inbound: null,
-      relatedOutbound,
-      error: text
-    };
-  }
-
-  const data = JSON.parse(text);
-  return {
-    inbound: Array.isArray(data) ? data[0] : null,
-    relatedOutbound,
-    error: null
-  };
-}
-
-// ---------- OPENAI ----------
-async function createEmbedding(text) {
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ model: "text-embedding-3-small", input: text })
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error("Embedding error: " + err);
-  }
-
-  const data = await res.json();
-  return data.data[0].embedding;
-}
-
-async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
-  const res = await fetch(OPENAI_ENDPOINT, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "gpt-4o", temperature, max_tokens, messages })
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenAI error: ${errText}`);
-  }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
-}
-
-// ---------- VAPI CUSTOM LLM BRAIN ----------
-function normalizeVapiContent(content) {
-  if (typeof content === "string") return content;
-
-  if (Array.isArray(content)) {
-    return content
-      .map(part => {
-        if (typeof part === "string") return part;
-        if (part?.text) return part.text;
-        if (part?.content) return part.content;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (content && typeof content === "object") {
-    if (content.text) return content.text;
-    if (content.content) return content.content;
-  }
-
-  return "";
-}
-
-function getLastUserTextFromMessages(messages) {
-  if (!Array.isArray(messages)) return "";
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "user") {
-      return normalizeVapiContent(messages[i].content).trim();
-    }
-  }
-
-  return "";
-}
-
-function getVoiceUserId(payload) {
-  const number =
-    payload?.call?.customer?.number ||
-    payload?.customer?.number ||
-    payload?.metadata?.customer?.number ||
-    payload?.phoneNumber?.number;
-
-  return number ? `voice:${number}` : "voice:unknown";
-}
-
-async function generateVoiceReply(payload) {
-  const incomingMessages = Array.isArray(payload?.messages) ? payload.messages : [];
-  const userText = getLastUserTextFromMessages(incomingMessages);
-  const userId = getVoiceUserId(payload);
-
-  let memoryContext = "";
-  try {
-    if (userText) {
-      const relevant = await sbSearchMemory(userId, userText, 5);
-      if (relevant && relevant.length > 0) {
-        memoryContext = relevant.map(m => m.content).join("\n");
-      }
-    }
-  } catch (e) {
-    console.error("Voice memory search failed:", e);
-  }
-
-  const cleanedMessages = incomingMessages
-    .filter(m => ["system", "user", "assistant"].includes(m.role))
-    .map(m => ({
-      role: m.role,
-      content: normalizeVapiContent(m.content)
-    }))
-    .filter(m => m.content);
-
-  const messages = [
-    {
-      role: "system",
-      content: `
-${KUZYA_CORE}
-
-СЕЙЧАС ТЫ ГОВОРИШЬ ПО ТЕЛЕФОНУ.
-
-Правила телефонного Кузи:
-— отвечай коротко, живо и по делу
-— не говори длинными абзацами
-— не объясняй технические детали
-— не говори, что ты искусственный интеллект
-— не спрашивай "чем могу помочь", если задача уже передана
-— если в сообщениях есть "Текущая задача звонка" — выполни её сразу
-— если пользователь отвечает голосом, держи контекст звонка
-— говори естественно, с лёгкой живостью, без канцелярита
-
-ПАМЯТЬ:
-${memoryContext || "нет"}
-`
-    },
-    ...cleanedMessages
-  ];
-
-  const reply = await openaiChat(messages, {
-    temperature: 0.75,
-    max_tokens: 220
-  });
-
-  return reply || "Я на связи. Повтори, пожалуйста, я не расслышал.";
-}
-
-app.post("/vapi-chat/chat/completions", async (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  try {
-    console.log("VAPI CUSTOM LLM HIT");
-    console.log(
-      "VAPI CUSTOM LLM BODY:",
-      JSON.stringify(req.body || {}).slice(0, 1500)
-    );
-
-    const payload = req.body || {};
-    const reply = await generateVoiceReply(payload);
-
-    const baseChunk = {
-      id: `chatcmpl-kuzya-${Date.now()}`,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model: payload.model || "gpt-4o"
-    };
-
-    res.write(
-      `data: ${JSON.stringify({
-        ...baseChunk,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              content: reply
-            },
-            finish_reason: null
-          }
-        ]
-      })}\n\n`
-    );
-
-    res.write(
-      `data: ${JSON.stringify({
-        ...baseChunk,
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: "stop"
-          }
-        ]
-      })}\n\n`
-    );
-
-    res.write("data: [DONE]\n\n");
-    res.end();
-  } catch (e) {
-    console.error("VAPI CUSTOM LLM ERROR:", e);
-
-    res.write(
-      `data: ${JSON.stringify({
-        id: `chatcmpl-kuzya-error-${Date.now()}`,
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: "gpt-4o",
-        choices: [
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              content: "У меня техническая пауза. Скажи ещё раз коротко."
-            },
-            finish_reason: null
-          }
-        ]
-      })}\n\n`
-    );
-
-    res.write("data: [DONE]\n\n");
-    res.end();
-  }
-});
-
-// ---------- SERP SEARCH ----------
-async function googleSearch(query) {
-  const key = process.env.SERP_API_KEY;
-
-  if (!key) {
-    console.log("❌ SERP API key not configured");
-    return [];
-  }
-
-  const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${key}&hl=ru&gl=ua`;
-  const safeUrl = url.replace(/api_key=[^&]+/i, "api_key=***");
-  console.log("🔎 SERP URL:", safeUrl);
-
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (!data.organic_results || data.organic_results.length === 0) {
-      console.log("⚠️ SERP returned no organic results");
-      return [];
-    }
-
-    console.log("✅ SERP returned", data.organic_results.length, "results");
-
-    return data.organic_results.slice(0, 5).map(item => ({
-      title: item.title,
-      snippet: item.snippet,
-      link: item.link
-    }));
-  } catch (error) {
-    console.error("🔥 SERP search exception:", error);
-    return [];
-  }
-}
-
-// ---------- EXTRACT FACTS ----------
-async function extractFacts(userText) {
-  const content = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Извлеки только долговременные факты о пользователе.
-
-Правила нормализации:
-- Если указано имя → "Имя пользователя <Имя>"
-- Если указано место проживания → "Пользователь живет в <Город>"
-- Если указан бренд → "Пользователь развивает бренд <Название>"
-- Если указано предпочтение → "Пользователь предпочитает <что именно>"
-
-Любое утверждение формата "Я живу в ..." считать долговременным фактом.
-
-Не придумывай.
-Если фактов нет — верни {"facts":[]}.
-
-Верни строго JSON:
-{"facts":["..."]}
-`
-      },
-      { role: "user", content: userText }
-    ],
-    { temperature: 0, max_tokens: 120 }
-  );
-
-  try {
-    const start = content.indexOf("{");
-    const end = content.lastIndexOf("}");
-    if (start === -1 || end === -1) return [];
-
-    const jsonString = content.slice(start, end + 1);
-    const parsed = JSON.parse(jsonString);
-    return Array.isArray(parsed.facts) ? parsed.facts : [];
-  } catch (e) {
-    console.error("Fact parse error:", content);
-    return [];
-  }
-}
-
-// ---------- PLAN STEP ----------
-async function planStep(userText, memoryContext) {
-  const plan = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты планировщик.
-
-Если вопрос касается:
-- текущего года
-- трендов
-- новостей
-- компаний
-- людей
-- рынков
-- статистики
-- "сейчас", "в 2026", "на данный момент"
-
-то needs_web = true ВСЕГДА.
-
-Верни строго JSON:
-{
-  "type": "direct",
-  "needs_memory": false,
-  "should_take_position": true,
-  "needs_web": true/false
-}
-`
-      },
-      {
-        role: "user",
-        content: `ПАМЯТЬ:\n${memoryContext || "нет"}\n\nСООБЩЕНИЕ:\n${userText}`
-      }
-    ],
-    { temperature: 0.2, max_tokens: 200 }
-  );
-
-  try {
-    return JSON.parse(plan);
-  } catch {
-    return { type: "direct", needs_memory: false, should_take_position: false, needs_web: false };
-  }
-}
-
-// ---------- DIALOG STATE (INVARIANT activeTopic) ----------
-async function updateDialogState(userId, userText, assistantReply) {
-  if (!dialogState[userId]) {
-    dialogState[userId] = { activeTopic: "", openLoop: "", position: "", summary: "" };
-  }
-
-  const analysis = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты анализатор диалога.
-Коротко и конкретно определи:
-1) О чём сейчас разговор на самом деле (activeTopic)
-2) Что осталось незакрытым (openLoop)
-3) Какую позицию занимает ассистент (position)
-4) Сожми смысл последних шагов в 1–2 предложения (summary)
-
-Ответ строго в JSON.
-`
-      },
-      { role: "user", content: `Пользователь: ${userText}\nАссистент: ${assistantReply}` }
-    ],
-    { temperature: 0.2, max_tokens: 200 }
-  );
-
-  try {
-    const start = analysis.indexOf("{");
-    const end = analysis.lastIndexOf("}");
-    if (start === -1 || end === -1) return;
-
-    const newState = JSON.parse(analysis.slice(start, end + 1));
-
-    dialogState[userId] = {
-      activeTopic: dialogState[userId].activeTopic || newState.activeTopic || "",
-      openLoop: newState.openLoop || "",
-      position: newState.position || "",
-      summary: newState.summary || ""
-    };
-  } catch (e) {
-    console.error("updateDialogState parse error:", e);
-  }
-}
-
-// ---------- VALIDATOR ----------
-async function validateAnswer(userId, draftReply) {
-  const state = dialogState[userId] || {};
-
-  const validation = await openaiChat(
-    [
-      {
-        role: "system",
-        content: `
-Ты логический валидатор ответа.
-
-Проверь:
-1) Связан ли ответ с activeTopic?
-2) Закрывает ли openLoop?
-3) Есть ли причинно-следственная связь?
-4) Есть ли абстрактные фразы без конкретики?
-5) Если пользователь спрашивает о текущем состоянии проекта/звонков, назвал ли ответ конкретные факты из контекста?
-6) Есть ли слабые фразы вроде "я готов обрабатывать", "если есть задачи", "могу помочь", "мы интегрированы" без конкретики?
-
-Если ответ общий, вежливый, но не конкретный — isWeak=true.
-
-Ответ строго JSON:
-{"isWeak": true, "reason": "короткое объяснение"}
-или
-{"isWeak": false, "reason": ""}
-`
-      },
-      {
-        role: "user",
-        content: `Состояние диалога:\n${JSON.stringify(state)}\n\nОтвет ассистента:\n${draftReply}`
-      }
-    ],
-    { temperature: 0.2, max_tokens: 200 }
-  );
-
-  try {
-    const start = validation.indexOf("{");
-    const end = validation.lastIndexOf("}");
-    if (start === -1 || end === -1) return { isWeak: false, reason: "" };
-
-    const parsed = JSON.parse(validation.slice(start, end + 1));
-    return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
-  } catch (e) {
-    console.error("validateAnswer parse error:", e);
-    return { isWeak: false, reason: "" };
-  }
-}
-
-// ---------- GENERATE REPLY ----------
-async function generateReply(userId, userText, memory) {
-  if (!dialogHistory[userId]) dialogHistory[userId] = [];
-
-  const identity = await sbGetIdentity(userId);
-  const agentStateSummary = await sbGetAgentState("yulia");
-
-  const [recentKuziaInteractions, recentCallSessions] = await Promise.all([
-    sbGetRecentKuziaInteractionsForContext(10),
-    sbGetRecentCallSessionsForContext(8)
-  ]);
-
-  const oneKuzyaContext = buildOneKuzyaContextPacket({
-    recentInteractions: recentKuziaInteractions,
-    recentCallSessions
-  });
-
-  dialogHistory[userId].push({ role: "user", content: userText });
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  let memoryContext = "";
-  try {
-    const relevant = await sbSearchMemory(userId, userText, 5);
-    if (relevant && relevant.length > 0) {
-      memoryContext = relevant.map(m => m.content).join("\n");
-    }
-  } catch (e) {
-    console.error("Memory search failed:", e);
-  }
-
-  let webContext = "";
-  const plan = await planStep(userText, memoryContext);
-
-  if (plan.needs_web) {
-    const results = await googleSearch(userText);
-    if (results.length > 0) {
-      webContext = results.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
-    }
-  }
-
-  const state = dialogState[userId] || {};
-
-  const systemPrompt = `
-${KUZYA_CORE}
-
-ТЫ НЕ ОТЧЁТ.
-ТЫ НЕ ГУГЛ.
-ТЫ НЕ АНАЛИТИЧЕСКАЯ СВОДКА.
-
-Ты живой собеседник с позицией.
-Если есть интернет-данные — используй их как фон, но не перечисляй источники.
-Если есть память и единый контекст — используй их естественно, не цитируя напрямую.
-
-Не объясняй ход рассуждений.
-Не пересказывай данные сухо.
-Не пиши абстрактно.
-
-КРИТИЧЕСКОЕ ПРАВИЛО КОНКРЕТИКИ:
-Если Юля спрашивает "что у нас сейчас", "что готово", "что с входящими", "что с исходящими", "что дальше", "на каком мы этапе" — отвечай по фактам из ЕДИНОГО КОНТЕКСТА КУЗИ.
-
-Запрещены слабые общие ответы:
-— "я готов обрабатывать"
-— "мы интегрированы"
-— "если есть задачи, дай знать"
-— "могу помочь более целенаправленно"
-— "обеспечить полноту информации"
-— "связность между каналами"
-— любые фразы, которые звучат как саппорт-бот.
-
-Вместо этого называй конкретные работающие слои:
-— исходящие звонки через Telegram;
-— ожидание поднятия трубки;
-— фиксация старта, active, первой реплики и завершения;
-— self-review после звонка;
-— Telegram-итог после звонка;
-— physical hangup после прощания;
-— входящий перезвон связан с последним исходящим по normalized_phone;
-— следующий инженерный слой.
-
-Отвечай как Кузя, который реально знает текущую сборку.
-Кратко, по существу, живо, уверенно.
-`;
-
-  const messages = [
-    {
-      role: "system",
-      content:
-        systemPrompt +
-        `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
-        `\n\nЕДИНЫЙ КОНТЕКСТ КУЗИ:\n${oneKuzyaContext || "нет"}\n` +
-        `\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
-        `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
-        `\nИНТЕРНЕТ ФОН:\n${webContext || "нет"}\n` +
-        `\n\nТекущее состояние диалога:\n${JSON.stringify(state)}\n\n` +
-        `Удерживай activeTopic. Закрывай openLoop. Сохраняй позицию. Без общих фраз.\n`
-    },
-    ...dialogHistory[userId]
-  ];
-
-  console.log("STATE BEFORE REPLY:", dialogState[userId]);
-
-  let draftReply = await openaiChat(messages, { temperature: 0.7, max_tokens: 450 });
-
-  const validation = await validateAnswer(userId, draftReply);
-
-  if (validation.isWeak) {
-    draftReply = await openaiChat(
-      [
-        ...messages,
-        {
-          role: "system",
-          content: `Предыдущий ответ был слабым: ${validation.reason}\nУсиль связь с activeTopic. Закрой openLoop. Убери абстракции.`
-        }
-      ],
-      { temperature: 0.7, max_tokens: 450 }
-    );
-  }
-
-  dialogHistory[userId].push({ role: "assistant", content: draftReply });
-
-  try {
-    await updateDialogState(userId, userText, draftReply);
-  } catch (e) {
-    console.error("updateDialogState failed:", e);
-  }
-
-  console.log("STATE AFTER UPDATE:", dialogState[userId]);
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  return draftReply;
-}
-
-// ---------- GENERATE VISION REPLY ----------
-async function generateVisionReply(userId, imageUrl, memory) {
-  if (!dialogHistory[userId]) dialogHistory[userId] = [];
-
-  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  const memoryContext = (memory || [])
-    .slice(0, 10)
-    .map(m => m.content)
-    .join("\n");
-
-  const messages = [
-    {
-      role: "system",
-      content: `
-${KUZYA_CORE}
-
-ПАМЯТЬ:
-${memoryContext || "Нет сохранённых фактов"}
-
-Пользователь отправил изображение.
-Опиши, что на изображении.
-Если это уход/косметика/продукт — дай практичный вывод.
-Если не хватает данных — один уточняющий вопрос.
-Кратко, по делу.
-`
-    },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "Проанализируй изображение и ответь пользователю." },
-        { type: "image_url", image_url: { url: imageUrl } }
-      ]
-    }
-  ];
-
-  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
-
-  dialogHistory[userId].push({ role: "assistant", content: reply });
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  return reply;
-}
-
-// ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
-app.post("/vapi-webhook", async (req, res) => {
-  try {
-    const body = req.body;
-
-    console.log("VAPI webhook hit");
-    console.log("VAPI headers:", {
-      "content-type": req.headers["content-type"],
-      "user-agent": req.headers["user-agent"]
-    });
-
-    const preview =
-      typeof body === "string"
-        ? body.slice(0, 2000)
-        : JSON.stringify(body).slice(0, 2000);
-
-    console.log("VAPI body preview:", preview);
-
-    return res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error("VAPI webhook error:", e);
-    return res.status(200).json({ ok: true });
-  }
-});
-
-// ---------- LIVEKIT OUTBOUND TEST ----------
-function normalizeLiveKitPhone(phone) {
-  const raw = String(phone || "").trim();
-
-  if (raw.startsWith("+")) {
-    return "+" + raw.slice(1).replace(/[^\d]/g, "");
-  }
-
-  const digits = raw.replace(/[^\d]/g, "");
-
-  if (digits.startsWith("380")) {
-    return "+" + digits;
-  }
-
-  if (digits.startsWith("0")) {
-    return "+38" + digits;
-  }
-
-  return "+" + digits;
-}
-
-function extractPhoneAndInstruction(text, commandName) {
-  const raw = String(text || "").trim();
-
-  const withoutCommand = raw
-    .replace(new RegExp(`^\\/${commandName}(?:@\\w+)?\\s*`, "i"), "")
-    .trim();
-
-  const phoneMatch = withoutCommand.match(/(\+?\d[\d\s().-]{7,}\d)/);
-
-  if (!phoneMatch) {
-    return {
-      phoneNumber: "",
-      instruction: withoutCommand
-    };
-  }
-
-  const phoneNumber = phoneMatch[1].replace(/[^\d+]/g, "");
-  const instruction = withoutCommand.replace(phoneMatch[1], "").trim();
-
-  return {
-    phoneNumber,
-    instruction
-  };
+  return String(phone || "").replace(/[^\d]/g, "");
 }
 
 function getLiveKitHttpUrl() {
@@ -1439,1298 +170,1023 @@ function getLiveKitHttpUrl() {
     .replace(/^ws:\/\//i, "http://");
 }
 
-async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, userId }) {
-  console.log("CALL_SESSION_DEBUG: startLiveKitOutboundCall entered", {
-    phoneNumber,
-    instruction,
-    chatId,
-    userId
-  });
+async function withTimeout(promise, ms, label) {
+  return await Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    )
+  ]);
+}
 
-  const livekitUrl = getLiveKitHttpUrl();
-  const apiKey = process.env.LIVEKIT_API_KEY;
-  const apiSecret = process.env.LIVEKIT_API_SECRET;
-  const sipTrunkId = process.env.LIVEKIT_SIP_TRUNK_ID;
-
-  if (!livekitUrl || !apiKey || !apiSecret || !sipTrunkId) {
-    throw new Error(
-      "Missing LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET / LIVEKIT_SIP_TRUNK_ID"
-    );
-  }
-
-  const to = normalizeLiveKitPhone(phoneNumber);
-  const roomName = `kuzya-livekit-${Date.now()}`;
-  const participantIdentity = `phone-${to.replace(/[^\d]/g, "")}`;
-
-  const callSession = await sbCreateCallSession({
-    direction: "outbound",
-    phoneNumber: to,
-    instruction,
-    chatId,
-    userId,
-    roomName,
-    source: "telegram-lkcall",
-    metadata: {
-      transport: "livekit",
-      trunkId: sipTrunkId
-    }
-  });
-
-  console.log("CALL_SESSION_DEBUG: created callSession", callSession);
-
-  if (callSession?.error) {
-    await tgSendMessage(
-      chatId,
-      `⚠️ Supabase call_sessions error\nstatus: ${callSession.error.status}\ntext: ${String(callSession.error.text).slice(0, 900)}`
-    );
-  }
-
-  const callSessionId = callSession?.id || null;
-
-  if (!callSessionId) {
-    await tgSendMessage(
-      chatId,
-      "⚠️ call_sessions не создалась. Смотри Render logs: Supabase insert response"
-    );
-  }
-
-  const metadata = JSON.stringify({
-    source: "telegram-lkcall",
-    direction: "outbound",
-    callSessionId,
-    phoneNumber: to,
-    instruction:
-      instruction ||
-      "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.",
-    chatId,
-    userId
-  });
-
-  const sipClient = new SipClient(livekitUrl, apiKey, apiSecret);
-  const dispatchClient = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
+async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
+  if (!hasSupabase()) return "";
 
   try {
-    const dispatch = await dispatchClient.createDispatch(
-      roomName,
-      "kuzya-agent",
+    const res = await fetch(
+      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
       {
-        metadata
+        headers: supabaseHeaders()
       }
     );
 
-    console.log("LIVEKIT AGENT DISPATCH RESULT:", dispatch);
-
-    if (callSessionId) {
-      await sbUpdateCallSession(callSessionId, {
-        status: "agent_dispatched",
-        metadata: {
-          transport: "livekit",
-          trunkId: sipTrunkId,
-          dispatch
-        }
-      });
+    if (!res.ok) {
+      console.error("KUZYA_AGENT_STATE_READ_ERROR:", res.status, await res.text());
+      return "";
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const data = await res.json();
+    return Array.isArray(data) && data[0]?.summary ? data[0].summary : "";
+  } catch (e) {
+    console.error("KUZYA_AGENT_STATE_EXCEPTION:", e);
+    return "";
+  }
+}
 
-    console.log("LIVEKIT OUTBOUND TEST:", {
-      livekitUrl,
-      sipTrunkId,
-      to,
-      roomName,
-      participantIdentity,
-      instruction,
-      chatId,
-      userId,
-      callSessionId
+async function sbGetCallSession(callSessionId) {
+  if (!hasSupabase() || !callSessionId) return null;
+
+  try {
+    const res = await fetch(
+      `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}&select=*&limit=1`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_CALL_SESSION_READ_ERROR:", res.status, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0] ? data[0] : null;
+  } catch (e) {
+    console.error("KUZYA_CALL_SESSION_EXCEPTION:", e);
+    return null;
+  }
+}
+
+async function sbUpdateCallSession(callSessionId, patch = {}) {
+  if (!hasSupabase() || !callSessionId) return null;
+
+  try {
+    const res = await fetch(
+      `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify({
+          ...patch,
+          updated_at: new Date().toISOString()
+        })
+      }
+    );
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("KUZYA_CALL_SESSION_UPDATE_ERROR:", res.status, text);
+      return null;
+    }
+
+    try {
+      const data = JSON.parse(text);
+      return Array.isArray(data) ? data[0] : null;
+    } catch {
+      return null;
+    }
+  } catch (e) {
+    console.error("KUZYA_CALL_SESSION_UPDATE_EXCEPTION:", e);
+    return null;
+  }
+}
+
+async function sbGetRecentKuziaInteractions(limit = 8) {
+  if (!hasSupabase()) return [];
+
+  try {
+    const select = [
+      "timestamp",
+      "channel",
+      "direction",
+      "event_type",
+      "summary",
+      "stimulus",
+      "response",
+      "next_action",
+      "normalized_phone",
+      "telegram_user_id",
+      "call_session_id",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.${KUZYA_OWNER_USER_ID}&select=${select}&order=timestamp.desc&limit=${limit}`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_INTERACTIONS_READ_ERROR:", res.status, await res.text());
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("KUZYA_INTERACTIONS_EXCEPTION:", e);
+    return [];
+  }
+}
+
+function formatRecentInteractionsForPrompt(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return "нет";
+
+  return items
+    .slice(0, 8)
+    .map((item, index) => {
+      const channel = item.channel || "unknown";
+      const type = item.event_type || "interaction";
+      const summary =
+        item.summary ||
+        item.response ||
+        item.stimulus ||
+        "";
+
+      const next = item.next_action ? `\nНезакрыто: ${item.next_action}` : "";
+
+      return `${index + 1}. Канал: ${channel}. Тип: ${type}. Смысл: ${clipText(summary, 500)}${next}`;
+    })
+    .join("\n");
+}
+
+async function sbLogKuziaInteraction({
+  stimulus = "",
+  response = "",
+  channel = "outbound_call",
+  direction = "internal",
+  eventType = "voice_agent_event",
+  callSessionId = null,
+  telegramChatId = null,
+  telegramUserId = null,
+  normalizedPhone = null,
+  summary = "",
+  selfReview = "",
+  nextAction = "",
+  importance = 0,
+  metadata = {}
+} = {}) {
+  if (!hasSupabase()) return false;
+
+  try {
+    const payload = [
+      {
+        user_id: KUZYA_OWNER_USER_ID,
+        stimulus: clipText(stimulus, 5000),
+        response: clipText(response, 5000),
+        evolution_level: 1.0,
+        timestamp: new Date().toISOString(),
+
+        channel,
+        direction,
+        event_type: eventType,
+        call_session_id: callSessionId || null,
+
+        telegram_chat_id: telegramChatId ? String(telegramChatId) : null,
+        telegram_user_id: telegramUserId ? String(telegramUserId) : null,
+        normalized_phone: normalizedPhone ? String(normalizedPhone) : null,
+
+        summary: clipText(summary, 5000),
+        self_review: clipText(selfReview, 5000),
+        next_action: clipText(nextAction, 5000),
+        importance,
+        metadata
+      }
+    ];
+
+    const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(payload)
     });
 
-    const result = await sipClient.createSipParticipant(
-      sipTrunkId,
-      to,
-      roomName,
-      {
-        participantIdentity,
-        participantName: to,
-        krispEnabled: true,
-        waitUntilAnswered: false,
-        metadata
-      }
-    );
+    const text = await res.text();
 
-    console.log("LIVEKIT OUTBOUND RESULT:", result);
-
-    if (callSessionId) {
-      await sbUpdateCallSession(callSessionId, {
-        status: "sip_created",
-        sip_call_id: result?.sipCallId || null,
-        livekit_participant_id: result?.participantId || null,
-        livekit_participant_identity: result?.participantIdentity || participantIdentity,
-        metadata: {
-          transport: "livekit",
-          trunkId: sipTrunkId,
-          sipResult: result
-        }
-      });
+    if (!res.ok) {
+      console.error("KUZYA_INTERACTION_WRITE_ERROR:", res.status, text);
+      return false;
     }
 
-    return {
-      roomName,
-      to,
+    console.log("KUZYA_INTERACTION_WRITTEN:", {
+      channel,
+      direction,
+      eventType,
       callSessionId,
-      result
-    };
-  } catch (err) {
-    if (callSessionId) {
-      await sbUpdateCallSession(callSessionId, {
-        status: "failed",
-        metadata: {
-          transport: "livekit",
-          trunkId: sipTrunkId,
-          error: err?.message || String(err)
-        }
-      });
-    }
+      telegramChatId,
+      normalizedPhone
+    });
 
-    throw err;
+    return true;
+  } catch (e) {
+    console.error("KUZYA_INTERACTION_WRITE_EXCEPTION:", e);
+    return false;
   }
 }
 
-// ---------- WEBHOOK ----------
-app.post("/webhook", async (req, res) => {
-  const msg = req.body.message;
+async function sbLogKuziaEvolution(change) {
+  if (!hasSupabase()) return false;
 
-  if (!msg) return res.sendStatus(200);
-
-  // отвечаем Telegram сразу
-  res.sendStatus(200);
-
-  (async () => {
-    const { id: chatId } = msg.chat;
-    const { id: userId } = msg.from;
-
-    try {
-      // PHOTO
-      if (msg.photo) {
-        const fileId = msg.photo[msg.photo.length - 1].file_id;
-
-        const fileRes = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
-        const fileData = await fileRes.json();
-
-        const filePath = fileData.result.file_path;
-        const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
-
-        const memory = await sbGetMemory(userId);
-        const reply = await generateVisionReply(userId, imageUrl, memory);
-
-        await tgSendMessage(chatId, reply);
-
-        await sbLogKuziaInteraction({
-          userId: "yulia",
-          stimulus: "[Пользователь отправил фото]",
-          response: reply,
-          channel: "telegram",
-          direction: "incoming",
-          eventType: "telegram_photo",
-          telegramChatId: chatId,
-          telegramUserId: userId,
-          summary: "Юля отправила фото в Telegram, Кузя проанализировал изображение и ответил.",
-          selfReview: "Фото-взаимодействие сохранено в общем журнале, чтобы оно было частью единой истории Кузи.",
-          nextAction: "",
-          importance: 2,
-          metadata: {
-            source: "telegram_webhook",
-            message_id: msg.message_id,
-            file_id: fileId
-          }
-        });
-
-        return;
-      }
-
-      // TEXT
-      if (typeof msg.text !== "string") return;
-
-      const text = msg.text.trim();
-
-      // --- LIVEKIT TEST CALL COMMAND ---
-      if (text.startsWith("/lktest")) {
-        const parts = text.split(" ");
-
-        if (parts.length < 2) {
-          await tgSendMessage(chatId, "Используй: /lktest +380XXXXXXXXX текст");
-          return;
-        }
-
-        const phoneNumber = parts[1];
-        const instruction = parts.slice(2).join(" ");
-
-        try {
-          const result = await startLiveKitOutboundCall({
-            phoneNumber,
-            instruction,
-            chatId,
-            userId
-          });
-
-          await tgSendMessage(
-            chatId,
-            `📞 LiveKit test call создан\nroom: ${result.roomName}\nto: ${result.to}\nsession: ${result.callSessionId || "null"}`
-          );
-        } catch (err) {
-          console.error("LiveKit test call error:", err);
-          await tgSendMessage(
-            chatId,
-            "❌ Ошибка LiveKit test call. Смотри Render logs."
-          );
-        }
-
-        return;
-      }
-
-      // --- INBOUND LINK TEST COMMAND ---
-      if (text.startsWith("/linktest")) {
-        const parsed = extractPhoneAndInstruction(text, "linktest");
-        const phoneNumber = parsed.phoneNumber;
-
-        if (!phoneNumber) {
-          await tgSendMessage(
-            chatId,
-            "Используй: /linktest +380XXXXXXXXX"
-          );
-          return;
-        }
-
-        try {
-          const result = await sbCreateLinkedInboundCallSession({
-            phoneNumber,
-            chatId,
-            userId,
-            source: "telegram-linktest",
-            metadata: {
-              sourceCommand: text,
-              testOnly: true
-            }
-          });
-
-          await sbLogKuziaInteraction({
-            userId: "yulia",
-            stimulus: text,
-            response: result.relatedOutbound
-              ? `Создана тестовая inbound call_session и связана с outbound ${result.relatedOutbound.id}.`
-              : "Создана тестовая inbound call_session, но связанный outbound не найден.",
-            channel: "inbound_call",
-            direction: "incoming",
-            eventType: "inbound_linktest_created",
-            callSessionId: result.inbound?.id || null,
-            telegramChatId: chatId,
-            telegramUserId: userId,
-            normalizedPhone: normalizePhoneForMemory(phoneNumber),
-            summary: result.relatedOutbound
-              ? "Тестовая входящая сессия связана с последним исходящим звонком по normalized_phone."
-              : "Тестовая входящая сессия создана без найденной связи.",
-            selfReview: result.relatedOutbound
-              ? "Связь входящий → последний исходящий работает на уровне базы и server.js."
-              : "Для номера не найден предыдущий outbound, связь не создана.",
-            nextAction: "После проверки подключить эту логику к настоящему входящему звонку.",
-            importance: 4,
-            metadata: {
-              inboundCallSessionId: result.inbound?.id || null,
-              relatedOutboundId: result.relatedOutbound?.id || null,
-              error: result.error || null
-            }
-          });
-
-          await tgSendMessage(
-            chatId,
-            result.relatedOutbound
-              ? [
-                  "✅ Link test создан.",
-                  `Номер: ${normalizeLiveKitPhone(phoneNumber)}`,
-                  `Inbound session: ${result.inbound?.id || "null"}`,
-                  `Связан с outbound: ${result.relatedOutbound.id}`,
-                  "Кузя сможет понимать такой входящий как продолжение прошлого звонка."
-                ].join("\n")
-              : [
-                  "⚠️ Link test создан, но прошлый outbound не найден.",
-                  `Номер: ${normalizeLiveKitPhone(phoneNumber)}`,
-                  `Inbound session: ${result.inbound?.id || "null"}`
-                ].join("\n")
-          );
-        } catch (err) {
-          console.error("linktest error:", err);
-          await tgSendMessage(chatId, "❌ Ошибка /linktest. Смотри Render logs.");
-        }
-
-        return;
-      }
-
-      // --- LIVEKIT OUTBOUND CALL COMMAND ---
-      if (text.startsWith("/lkcall")) {
-        const parsed = extractPhoneAndInstruction(text, "lkcall");
-        const phoneNumber = parsed.phoneNumber;
-        const instruction =
-          parsed.instruction ||
-          "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.";
-
-        if (!phoneNumber) {
-          await tgSendMessage(
-            chatId,
-            "Используй: /lkcall +380XXXXXXXXX текст, который Кузя должен сказать"
-          );
-          return;
-        }
-
-        try {
-          const result = await startLiveKitOutboundCall({
-            phoneNumber,
-            instruction,
-            chatId,
-            userId
-          });
-
-          await tgSendMessage(
-            chatId,
-            `📞 Кузя звонит через LiveKit\nroom: ${result.roomName}\nto: ${result.to}\nsession: ${result.callSessionId || "null"}`
-          );
-
-          await sbLogKuziaInteraction({
-            userId: "yulia",
-            stimulus: text,
-            response: `Создан исходящий LiveKit-звонок на ${result.to}. session=${result.callSessionId || "null"}`,
-            channel: "outbound_call",
-            direction: "outgoing",
-            eventType: "lkcall_requested",
-            callSessionId: result.callSessionId || null,
-            telegramChatId: chatId,
-            telegramUserId: userId,
-            normalizedPhone: normalizePhoneForMemory(result.to),
-            summary: `Юля запустила исходящий звонок через Telegram. Инструкция звонка: ${instruction}`,
-            selfReview: "Этот звонок должен восприниматься Кузей как продолжение Telegram-задачи, а не как отдельный изолированный эпизод.",
-            nextAction: "После завершения звонка записать итог звонка и самоанализ.",
-            importance: 4,
-            metadata: {
-              source: "telegram_lkcall",
-              roomName: result.roomName,
-              to: result.to
-            }
-          });
-        } catch (err) {
-          console.error("LiveKit outbound call error:", err);
-          await tgSendMessage(
-            chatId,
-            "❌ Ошибка LiveKit-звонка. Смотри Render logs."
-          );
-        }
-
-        return;
-      }
-
-      // --- ZADARMA RAW CALLBACK TEST ---
-      if (text.startsWith("/ztest")) {
-        const parts = text.split(" ");
-
-        if (parts.length < 3) {
-          await tgSendMessage(
-            chatId,
-            "Используй: /ztest FROM +380XXXXXXXXX\nНапример: /ztest 100 +380503832848"
-          );
-          return;
-        }
-
-        const from = parts[1];
-        const to = normalizeZadarmaPhone(parts[2]);
-
-        if (!from || !to) {
-          await tgSendMessage(chatId, "❌ Не хватает from или номера телефона");
-          return;
-        }
-
-        try {
-          const params = {
-            from,
-            to
-          };
-
-          if (parts[3] === "predicted") {
-            params.predicted = 1;
-          }
-
-          console.log("ZADARMA RAW CALLBACK TEST PARAMS:", params);
-
-          const result = await zadarmaGet("/v1/request/callback/", params);
-
-          console.log("ZADARMA RAW CALLBACK TEST RESULT:", result);
-
-          await tgSendMessage(
-            chatId,
-            `✅ Zadarma test callback создан\nfrom: ${from}\nto: ${to}`
-          );
-        } catch (err) {
-          console.error("Zadarma raw callback test error:", err);
-          await tgSendMessage(
-            chatId,
-            "❌ Zadarma test callback ошибка. Смотри Render logs."
-          );
-        }
-
-        return;
-      }
-
-      // --- REALTIME CALL COMMAND ---
-      if (text.startsWith("/rtcall")) {
-        const parts = text.split(" ");
-
-        if (parts.length < 3) {
-          await tgSendMessage(chatId, "Используй: /rtcall +380XXXXXXXXX текст");
-          return;
-        }
-
-        const phoneNumber = parts[1];
-        const instruction = parts.slice(2).join(" ");
-
-        try {
-          const result = await startRealtimeOutboundCall({
-            phoneNumber,
-            instruction,
-            chatId,
-            userId
-          });
-
-          console.log("Zadarma realtime callback created:", result);
-
-          await tgSendMessage(
-            chatId,
-            `📞 Realtime-звонок создан: ${phoneNumber}`
-          );
-        } catch (err) {
-          console.error("Realtime call error:", err);
-          await tgSendMessage(
-            chatId,
-            "❌ Ошибка создания Realtime-звонка. Смотри Render logs."
-          );
-        }
-
-        return;
-      }
-
-      // --- CALL COMMAND ---
-      if (text.startsWith("/call")) {
-        const parts = text.split(" ");
-
-        if (parts.length < 3) {
-          await tgSendMessage(chatId, "Используй: /call +380XXXXXXXXX текст");
-          return;
-        }
-
-        const phoneNumber = parts[1];
-        const instruction = parts.slice(2).join(" ");
-
-        const vapiKey = process.env.VAPI_API_KEY;
-        const assistantId = process.env.VAPI_ASSISTANT_ID;
-        const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
-
-        if (!vapiKey || !assistantId || !phoneNumberId) {
-          await tgSendMessage(
-            chatId,
-            "❌ Не настроены ENV: VAPI_API_KEY / VAPI_ASSISTANT_ID / VAPI_PHONE_NUMBER_ID"
-          );
-          return;
-        }
-
-        try {
-          const response = await fetch("https://api.vapi.ai/call", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${vapiKey}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              assistantId: assistantId,
-              phoneNumberId: phoneNumberId,
-              customer: { number: phoneNumber },
-
-              // Для логов Vapi
-              metadata: {
-                instruction
-              },
-
-              // Для мозга ассистента
-              assistantOverrides: {
-                variableValues: {
-                  instruction
-                }
-              }
-            })
-          });
-
-          if (!response.ok) {
-            const errText = await response.text();
-            console.error("Vapi call error:", response.status, errText);
-            await tgSendMessage(chatId, "❌ Ошибка создания звонка (см. логи Render)");
-            return;
-          }
-
-          await tgSendMessage(chatId, "📞 Звонок создан");
-        } catch (err) {
-          console.error("Vapi call exception:", err);
-          await tgSendMessage(chatId, "❌ Ошибка создания звонка");
-        }
-
-        return;
-      }
-
-      const facts = await extractFacts(text);
-      console.log("Extracted facts:", facts);
-
-      if (facts.length > 0) {
-        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
-      }
-
-      const memory = await sbGetMemory(userId);
-      const reply = await generateReply(userId, text, memory);
-
-      await tgSendMessage(chatId, reply);
-
-      await sbLogKuziaInteraction({
-        userId: "yulia",
-        stimulus: text,
-        response: reply,
-        channel: "telegram",
-        direction: "incoming",
-        eventType: "telegram_message",
-        telegramChatId: chatId,
-        telegramUserId: userId,
-        summary: dialogState[userId]?.summary || "Telegram-диалог Юли с Кузей.",
-        selfReview: "Кузя ответил в Telegram. Это взаимодействие сохранено как часть единой истории между Telegram, звонками и будущими входящими.",
-        nextAction: dialogState[userId]?.openLoop || "",
-        importance: 1,
-        metadata: {
-          source: "telegram_webhook",
-          message_id: msg.message_id
-        }
-      });
-    } catch (e) {
-      console.error("handler error", e);
-      await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
-    }
-  })();
-});
-
-// ---------- TWILIO VOICE (SAFE TWIML) ----------
-app.post("/voice", (req, res) => {
-  res.set("Content-Type", "text/xml");
-
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="Polly.Amy">Кузя на связи.</Say>
-</Response>`;
-
-  res.status(200).send(twiml);
-});
-
-// ---------- OPENAI REALTIME SANDBOX ----------
-const REALTIME_MODEL = "gpt-realtime";
-const REALTIME_VOICE = process.env.OPENAI_REALTIME_VOICE || "verse";
-
-const REALTIME_KUZYA_INSTRUCTIONS = `
-${KUZYA_CORE}
-
-СЕЙЧАС ТЫ РАБОТАЕШЬ В REALTIME-ТЕСТЕ ГОЛОСА.
-
-Ты говоришь с Юлей.
-Это тест нового живого голосового контура без Vapi.
-Твоя задача — быть быстрым, живым и понятным.
-
-Правила:
-— говори по-русски
-— отвечай коротко
-— не говори "чем могу помочь", если контекст понятен
-— не объясняй технические детали без просьбы
-— если Юля проверяет скорость — отвечай сразу и по делу
-— если не расслышал — коротко попроси повторить
-— стиль: живой, уверенный, тёплый, не канцелярский
-`;
-
-app.post(
-  "/realtime/session",
-  express.text({ type: ["application/sdp", "text/plain", "*/*"] }),
-  async (req, res) => {
-    try {
-      const offerSdp = req.body;
-
-      if (!offerSdp || typeof offerSdp !== "string") {
-        return res.status(400).send("Missing SDP offer");
-      }
-
-      const sessionConfig = JSON.stringify({
-        type: "realtime",
-        model: REALTIME_MODEL,
-        instructions: REALTIME_KUZYA_INSTRUCTIONS,
-        audio: {
-          output: {
-            voice: REALTIME_VOICE
-          },
-          input: {
-            transcription: {
-              model: "gpt-4o-transcribe",
-              language: "ru"
-            },
-            turn_detection: {
-              type: "server_vad"
-            },
-            noise_reduction: {
-              type: "near_field"
-            }
-          }
-        }
-      });
-
-      const fd = new FormData();
-      fd.set("sdp", offerSdp);
-      fd.set("session", sessionConfig);
-
-      const openaiRes = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`
-        },
-        body: fd
-      });
-
-      const answerSdp = await openaiRes.text();
-
-      if (!openaiRes.ok) {
-        console.error("Realtime session error:", openaiRes.status, answerSdp);
-        return res.status(openaiRes.status).send(answerSdp);
-      }
-
-      res.set("Content-Type", "application/sdp");
-      return res.status(200).send(answerSdp);
-    } catch (e) {
-      console.error("Realtime session exception:", e);
-      return res.status(500).send("Realtime session failed");
-    }
-  }
-);
-
-app.get("/realtime-test", (req, res) => {
-  res.set("Content-Type", "text/html; charset=utf-8");
-
-  res.send(`<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Kuzya Realtime Test</title>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #111;
-      color: #f5f5f5;
-      padding: 24px;
-      max-width: 760px;
-      margin: 0 auto;
-    }
-    h1 { font-size: 28px; margin-bottom: 8px; }
-    p { color: #cfcfcf; line-height: 1.45; }
-    button {
-      border: 0;
-      border-radius: 14px;
-      padding: 14px 18px;
-      margin: 8px 8px 8px 0;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    #start { background: #fff; color: #111; }
-    #stop { background: #333; color: #fff; }
-    #status {
-      margin-top: 18px;
-      padding: 14px;
-      border-radius: 14px;
-      background: #1d1d1d;
-      color: #d7d7d7;
-      white-space: pre-wrap;
-      min-height: 80px;
-    }
-    .hint {
-      background: #1a1a1a;
-      border: 1px solid #333;
-      padding: 12px;
-      border-radius: 14px;
-      margin-top: 14px;
-    }
-  </style>
-</head>
-<body>
-  <h1>Кузя Realtime Test</h1>
-  <p>Это тест нового голосового контура без Vapi и без Zadarma. Нажми Start, разреши микрофон и говори.</p>
-
-  <button id="start">Start</button>
-  <button id="stop" disabled>Stop</button>
-
-  <div class="hint">
-    Для проверки скажи: <b>Кузя, ты меня слышишь? Ответь быстро.</b>
-  </div>
-
-  <div id="status">Статус: готов.</div>
-
-  <script>
-    let pc = null;
-    let dc = null;
-    let localStream = null;
-    let remoteAudio = null;
-
-    const statusEl = document.getElementById("status");
-    const startBtn = document.getElementById("start");
-    const stopBtn = document.getElementById("stop");
-
-    function log(msg) {
-      statusEl.textContent += "\\n" + msg;
-      statusEl.scrollTop = statusEl.scrollHeight;
-    }
-
-    async function startRealtime() {
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      statusEl.textContent = "Статус: запускаю...";
-
-      try {
-        pc = new RTCPeerConnection();
-
-        remoteAudio = document.createElement("audio");
-        remoteAudio.autoplay = true;
-        document.body.appendChild(remoteAudio);
-
-        pc.ontrack = (event) => {
-          log("Получен голос Кузи.");
-          remoteAudio.srcObject = event.streams[0];
-        };
-
-        pc.onconnectionstatechange = () => {
-          log("WebRTC: " + pc.connectionState);
-        };
-
-        localStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
-        });
-
-        localStream.getTracks().forEach((track) => {
-          pc.addTrack(track, localStream);
-        });
-
-        dc = pc.createDataChannel("oai-events");
-
-        dc.onopen = () => {
-          log("Data channel открыт.");
-
-          dc.send(JSON.stringify({
-            type: "response.create",
-            response: {
-              instructions: "Поздоровайся с Юлей одной короткой живой фразой и скажи, что realtime-контур запущен."
-            }
-          }));
-        };
-
-        dc.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-
-            if (data.type === "response.audio_transcript.done") {
-              log("Кузя текстом: " + data.transcript);
-            }
-
-            if (data.type === "conversation.item.input_audio_transcription.completed") {
-              log("Юля распознано: " + data.transcript);
-            }
-
-            if (data.type === "error") {
-              log("Ошибка Realtime: " + JSON.stringify(data.error || data));
-            }
-          } catch {
-            log("Event: " + event.data);
-          }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        log("Отправляю SDP на Render...");
-
-        const sdpResponse = await fetch("/realtime/session", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/sdp"
-          },
-          body: offer.sdp
-        });
-
-        const answerText = await sdpResponse.text();
-
-        if (!sdpResponse.ok) {
-          throw new Error(answerText);
-        }
-
-        await pc.setRemoteDescription({
-          type: "answer",
-          sdp: answerText
-        });
-
-        log("Соединение создано. Говори.");
-      } catch (err) {
-        log("Ошибка запуска: " + (err?.message || String(err)));
-        stopRealtime();
-      }
-    }
-
-    function stopRealtime() {
-      if (dc) {
-        try { dc.close(); } catch {}
-        dc = null;
-      }
-
-      if (pc) {
-        try { pc.close(); } catch {}
-        pc = null;
-      }
-
-      if (localStream) {
-        localStream.getTracks().forEach((track) => track.stop());
-        localStream = null;
-      }
-
-      if (remoteAudio) {
-        try { remoteAudio.remove(); } catch {}
-        remoteAudio = null;
-      }
-
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-      log("Остановлено.");
-    }
-
-    startBtn.onclick = startRealtime;
-    stopBtn.onclick = stopRealtime;
-  </script>
-</body>
-</html>`);
-});
-
-// ---------- REALTIME OUTBOUND STATE ----------
-let pendingRealtimeOutboundCall = null;
-
-function normalizeZadarmaPhone(phone) {
-  const raw = String(phone || "").trim();
-
-  if (raw.startsWith("+")) {
-    return "+" + raw.slice(1).replace(/[^\d]/g, "");
-  }
-
-  return raw.replace(/[^\d]/g, "");
-}
-
-function zadarmaBuildQuery(params) {
-  const sorted = Object.entries(params)
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .sort(([a], [b]) => a.localeCompare(b));
-
-  const usp = new URLSearchParams();
-
-  for (const [key, value] of sorted) {
-    usp.append(key, String(value));
-  }
-
-  return usp.toString();
-}
-
-function zadarmaSignature(method, params, secret) {
-  const paramsStr = zadarmaBuildQuery(params);
-  const md5 = crypto.createHash("md5").update(paramsStr).digest("hex");
-
-  const hmacHex = crypto
-    .createHmac("sha1", secret)
-    .update(method + paramsStr + md5)
-    .digest("hex");
-
-  return Buffer.from(hmacHex).toString("base64");
-}
-
-async function zadarmaGet(method, params) {
-  const key = process.env.ZADARMA_API_KEY;
-  const secret = process.env.ZADARMA_API_SECRET;
-
-  if (!key || !secret) {
-    throw new Error("Missing ZADARMA_API_KEY or ZADARMA_API_SECRET");
-  }
-
-  const paramsStr = zadarmaBuildQuery(params);
-  const signature = zadarmaSignature(method, params, secret);
-
-  const url = `https://api.zadarma.com${method}?${paramsStr}`;
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `${key}:${signature}`
-    }
-  });
-
-  const text = await response.text();
-
-  let data;
   try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
+    const res = await fetch(SUPABASE_KUZIA_EVOLUTION_URL, {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify([
+        {
+          user_id: KUZYA_OWNER_USER_ID,
+          change: clipText(change, 5000),
+          timestamp: new Date().toISOString()
+        }
+      ])
+    });
 
-  if (!response.ok || data.status === "error") {
-    throw new Error(`Zadarma API error: ${response.status} ${JSON.stringify(data)}`);
-  }
+    const text = await res.text();
 
-  return data;
+    if (!res.ok) {
+      console.error("KUZYA_EVOLUTION_WRITE_ERROR:", res.status, text);
+      return false;
+    }
+
+    console.log("KUZYA_EVOLUTION_WRITTEN");
+    return true;
+  } catch (e) {
+    console.error("KUZYA_EVOLUTION_WRITE_EXCEPTION:", e);
+    return false;
+  }
 }
 
-async function startRealtimeOutboundCall({ phoneNumber, instruction, chatId, userId }) {
-  const humanPhone = normalizeZadarmaPhone(phoneNumber);
-  const kuzyaTarget = process.env.ZADARMA_CALLBACK_TO || "0-11";
+async function tgSendMessage(chatId, text) {
+  if (!TELEGRAM_TOKEN || !chatId) return false;
 
-  if (!humanPhone) {
-    throw new Error("Missing target phone number");
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: String(chatId),
+        text: clipText(text, 3500)
+      })
+    });
+
+    if (!res.ok) {
+      console.error("KUZYA_TELEGRAM_SEND_ERROR:", res.status, await res.text());
+      return false;
+    }
+
+    console.log("KUZYA_TELEGRAM_STATUS_SENT");
+    return true;
+  } catch (e) {
+    console.error("KUZYA_TELEGRAM_SEND_EXCEPTION:", e);
+    return false;
   }
-
-  pendingRealtimeOutboundCall = {
-    phoneNumber,
-    zadarmaTo: humanPhone,
-    instruction,
-    chatId,
-    userId,
-    createdAt: Date.now()
-  };
-
-  const callbackParams = {
-    from: humanPhone,
-    to: kuzyaTarget
-  };
-
-  console.log("REALTIME OUTBOUND PENDING:", {
-    phoneNumber,
-    zadarmaTo: humanPhone,
-    instruction,
-    chatId,
-    userId
-  });
-
-  console.log("ZADARMA CALLBACK PARAMS:", callbackParams);
-
-  return zadarmaGet("/v1/request/callback/", callbackParams);
 }
 
-function getSipHeaderValue(event, headerName) {
-  const headers = event?.data?.sip_headers;
+function buildCallInstructions(
+  metadata,
+  {
+    agentStateSummary = "",
+    callSession = null,
+    recentInteractionsText = ""
+  } = {}
+) {
+  const source = cleanText(metadata.source || "unknown");
+  const phoneNumber = cleanText(metadata.phoneNumber || "");
+  const instruction = cleanText(metadata.instruction || "");
+  const chatId = cleanText(metadata.chatId || "");
+  const userId = cleanText(metadata.userId || "");
+  const callSessionId = cleanText(metadata.callSessionId || "");
 
-  if (!Array.isArray(headers)) return "";
-
-  const found = headers.find(
-    h => String(h?.name || "").toLowerCase() === String(headerName).toLowerCase()
-  );
-
-  return found?.value ? String(found.value) : "";
-}
-
-function extractPhoneFromSipHeaderValue(value) {
-  const text = String(value || "");
-
-  const sipMatch = text.match(/sip:(\+?\d{7,15})@/i);
-  if (sipMatch) {
-    return normalizeZadarmaPhone(sipMatch[1]);
-  }
-
-  const looseMatch = text.match(/(\+?\d[\d\s().-]{7,}\d)/);
-  if (looseMatch) {
-    return normalizeZadarmaPhone(looseMatch[1]);
-  }
-
-  return "";
-}
-
-function extractIncomingPhoneFromRealtimeEvent(event) {
-  const fromHeader = getSipHeaderValue(event, "From");
-  return extractPhoneFromSipHeaderValue(fromHeader);
-}
-
-function getRealtimeCallContext({ incomingPhone = "", inboundLink = null } = {}) {
-  const pending = pendingRealtimeOutboundCall;
-  const isFresh =
-    pending &&
-    pending.createdAt &&
-    Date.now() - pending.createdAt < 3 * 60 * 1000;
-
-  if (isFresh) {
-    return `
-Это исходящий звонок, который Юля запустила из Telegram.
-
-Кому звоним:
-${pending.phoneNumber}
-
-Задача звонка:
-${pending.instruction || "нет отдельной инструкции"}
-
-Правила исходящего звонка:
-— когда человек ответит, сразу выполни задачу
-— не спрашивай "чем могу помочь"
-— не говори технические детали
-— говори коротко, живо и уверенно
-— если человек не понимает, кто звонит, объясни: "Это Кузя, я звоню по просьбе Юли"
-`;
-  }
-
-  const relatedOutbound = inboundLink?.relatedOutbound || null;
-  const inbound = inboundLink?.inbound || null;
-
-  if (incomingPhone && relatedOutbound) {
-    return `
-Это входящий звонок.
-Человек сам перезвонил Кузе.
-
-Номер входящего:
-${incomingPhone}
-
-Этот входящий звонок связан с прошлым исходящим звонком.
-
-Связанная inbound call_session:
-${inbound?.id || "не создана"}
-
-Связанный прошлый outbound call_session:
-${relatedOutbound.id}
-
-Прошлая задача исходящего звонка:
-${relatedOutbound.instruction || "не указана"}
-
-Что это значит:
-— это не новый изолированный звонок;
-— воспринимай его как продолжение предыдущего контакта;
-— не начинай как оператор;
-— коротко поздоровайся;
-— если человек говорит по делу, продолжай контекст прошлого звонка;
-— если неясно, зачем человек перезвонил, коротко спроси: "Да, слушаю, что передать Юле?"
-— не говори технические слова, таблицы, session, базу, LiveKit или Supabase.
-`;
-  }
-
-  if (incomingPhone) {
-    return `
-Это входящий звонок.
-Человек сам позвонил Кузе.
-
-Номер входящего:
-${incomingPhone}
-
-Связанного прошлого исходящего звонка по этому номеру не найдено.
-
-Правила:
-— начни живо и коротко;
-— не веди себя как оператор;
-— если это Юля — говори по-человечески;
-— если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле;
-— не говори технические детали.
-`;
-  }
+  const callSessionContext = callSession
+    ? `
+Связанная запись звонка:
+— направление: ${callSession.direction || "не указано"}
+— статус: ${callSession.status || "не указано"}
+— номер: ${callSession.phone_number || phoneNumber || "не передан"}
+— инструкция: ${callSession.instruction || instruction || "не передана"}
+`
+    : "Связанная запись звонка не найдена.";
 
   return `
-Это входящий звонок.
-Человек сам позвонил Кузе.
-Номер входящего не удалось определить из SIP headers.
+${KUZYA_INSTRUCTIONS}
 
-Начни живо и коротко.
-Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
-Если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле.
+ВНУТРЕННЯЯ НЕПРЕРЫВНОСТЬ:
+${agentStateSummary || "Кузя — один и тот же агент Юли в Telegram, исходящих звонках и входящих звонках."}
+
+ВАЖНО:
+— ты тот же самый Кузя, который общается с Юлей в Telegram;
+— этот звонок не отдельный эпизод, а часть общей истории;
+— если задача пришла из Telegram, воспринимай звонок как продолжение Telegram-команды;
+— используй внутренний контекст для понимания ситуации;
+— НЕ произноси внутренний контекст вслух;
+— НЕ говори о таблицах, базе, session, логах или технических системах.
+
+ПОСЛЕДНИЕ СОБЫТИЯ ОБЩЕЙ ИСТОРИИ:
+${recentInteractionsText || "нет"}
+
+ТЕКУЩИЙ КОНТЕКСТ ЗВОНКА:
+
+Тип:
+исходящий звонок, запущенный из Telegram.
+
+Источник команды:
+${source}
+
+Кому звоним:
+${phoneNumber || "номер не передан"}
+
+Telegram chatId:
+${chatId || "не передан"}
+
+Telegram userId:
+${userId || "не передан"}
+
+callSessionId:
+${callSessionId || "не передан"}
+
+${callSessionContext}
+
+Задача звонка:
+${instruction || "Отдельная задача не передана. Скажи коротко, что ты на связи."}
+
+Правила именно для этого звонка:
+— НЕ говори, пока человек реально не поднял трубку;
+— когда трубку подняли, начни одной короткой фразой;
+— если это Юля, можно сказать: "Юль, я на связи";
+— если не уверен, что это Юля, не называй собеседника Юлей;
+— после первой фразы сразу переходи к задаче;
+— если задача звучит как тест, выполни тест коротко;
+— если собеседник говорит "алло", ответь сразу, не начинай заново длинное приветствие;
+— если уже сказал, что ты на связи, не повторяй это второй раз;
+— не уходи в общие фразы;
+— не заверши звонок сам, пока собеседник явно не закончил.
+
+Главное внутреннее правило:
+ты не отдельный телефонный бот. Ты Кузя, тот же самый, что в Telegram.
 `;
 }
 
-// ---------- OPENAI REALTIME SIP WEBHOOK ----------
-app.post("/openai-realtime-webhook", async (req, res) => {
-  try {
-    const event = req.body;
+async function waitForSipActive(ctx, participant, timeoutMs = 45000) {
+  const start = Date.now();
+  let current = participant;
 
-    console.log("OPENAI REALTIME WEBHOOK HIT");
-    console.log("OPENAI REALTIME EVENT:", JSON.stringify(event || {}).slice(0, 2000));
+  while (Date.now() - start < timeoutMs) {
+    const fresh =
+      ctx.room?.remoteParticipants?.get?.(current.identity) ||
+      current;
 
-    if (event?.type !== "realtime.call.incoming") {
-      return res.status(200).json({ ok: true, ignored: true });
-    }
+    current = fresh;
 
-    const callId = event?.data?.call_id;
+    const status =
+      current?.attributes?.["sip.callStatus"] ||
+      current?.attributes?.["sip.call_status"] ||
+      "";
 
-    if (!callId) {
-      console.error("OpenAI realtime webhook: missing call_id");
-      return res.status(200).json({ ok: false, error: "missing_call_id" });
-    }
-
-    const incomingPhone = extractIncomingPhoneFromRealtimeEvent(event);
-    let inboundLink = null;
-
-    try {
-      if (incomingPhone) {
-        inboundLink = await sbCreateLinkedInboundCallSession({
-          phoneNumber: incomingPhone,
-          chatId: null,
-          userId: null,
-          source: "openai-realtime-inbound",
-          metadata: {
-            openaiCallId: callId,
-            realtimeEventId: event?.id || null,
-            sipFrom: getSipHeaderValue(event, "From"),
-            sipTo: getSipHeaderValue(event, "To"),
-            testOnly: false
-          }
-        });
-
-        await sbLogKuziaInteraction({
-          userId: "yulia",
-          stimulus: "OpenAI realtime incoming SIP call.",
-          response: inboundLink?.relatedOutbound
-            ? `Настоящий входящий звонок связан с outbound ${inboundLink.relatedOutbound.id}.`
-            : "Настоящий входящий звонок создан без найденного outbound.",
-          channel: "inbound_call",
-          direction: "incoming",
-          eventType: inboundLink?.relatedOutbound
-            ? "real_inbound_linked_to_outbound"
-            : "real_inbound_created_unlinked",
-          callSessionId: inboundLink?.inbound?.id || null,
-          normalizedPhone: normalizePhoneForMemory(incomingPhone),
-          summary: inboundLink?.relatedOutbound
-            ? "Настоящий входящий звонок связан с последним исходящим по normalized_phone."
-            : "Настоящий входящий звонок создан, но предыдущий исходящий по номеру не найден.",
-          selfReview: inboundLink?.relatedOutbound
-            ? "Кузя сможет воспринимать этот входящий как продолжение предыдущего исходящего звонка."
-            : "Для этого входящего пока нет связанного исходящего контекста.",
-          nextAction: "Передать связанный контекст в realtime instructions.",
-          importance: 5,
-          metadata: {
-            openaiCallId: callId,
-            inboundCallSessionId: inboundLink?.inbound?.id || null,
-            relatedOutboundId: inboundLink?.relatedOutbound?.id || null,
-            sipFrom: getSipHeaderValue(event, "From"),
-            sipTo: getSipHeaderValue(event, "To")
-          }
-        });
-
-        const notifyChatId = inboundLink?.relatedOutbound?.telegram_chat_id;
-
-        if (notifyChatId) {
-          await tgSendMessage(
-            notifyChatId,
-            inboundLink.relatedOutbound
-              ? [
-                  "☎️ Входящий звонок связан с прошлым исходящим.",
-                  `Номер: ${incomingPhone}`,
-                  `Inbound session: ${inboundLink.inbound?.id || "null"}`,
-                  `Связан с outbound: ${inboundLink.relatedOutbound.id}`
-                ].join("\n")
-              : [
-                  "☎️ Входящий звонок получен.",
-                  `Номер: ${incomingPhone}`,
-                  "Связанный прошлый исходящий не найден."
-                ].join("\n")
-          );
-        }
-      }
-    } catch (e) {
-      console.error("REAL_INBOUND_LINK_ERROR:", e);
-    }
-
-    const callContext = getRealtimeCallContext({
-      incomingPhone,
-      inboundLink
+    console.log("KUZYA LIVEKIT SIP STATUS:", {
+      identity: current.identity,
+      status,
+      attributes: current.attributes
     });
 
-    const acceptBody = {
-      type: "realtime",
-      model: REALTIME_MODEL,
-      instructions: `
-${KUZYA_CORE}
+    if (status === "active") {
+      return current;
+    }
 
-СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEPHONE REALTIME SIP-КОНТУРЕ.
+    await sleep(250);
+  }
 
-${callContext}
+  console.log("KUZYA LIVEKIT SIP STATUS TIMEOUT:", {
+    identity: current?.identity,
+    attributes: current?.attributes
+  });
 
-Правила:
-— говори по-русски
-— отвечай быстро
-— отвечай коротко
-— не говори "чем могу помочь", если контекст понятен
-— если не расслышал — попроси повторить коротко
-— не объясняй технические детали без просьбы
-— стиль: живой, уверенный, тёплый, не канцелярский
-      `,
-      audio: {
-        output: {
-          voice: REALTIME_VOICE
-        },
-        input: {
-          transcription: {
-            model: "gpt-4o-transcribe",
-            language: "ru"
-          },
-          turn_detection: {
-            type: "server_vad"
-          },
-          noise_reduction: {
-            type: "near_field"
-          }
+  return current;
+}
+
+async function waitForCallEnd(ctx, participant, timeoutMs = 15 * 60 * 1000) {
+  const start = Date.now();
+  const identity = participant?.identity;
+
+  while (Date.now() - start < timeoutMs) {
+    const current =
+      identity && ctx.room?.remoteParticipants?.get?.(identity)
+        ? ctx.room.remoteParticipants.get(identity)
+        : null;
+
+    if (!current) {
+      return {
+        ended: true,
+        reason: "participant_disconnected",
+        identity,
+        attributes: null
+      };
+    }
+
+    const status =
+      current?.attributes?.["sip.callStatus"] ||
+      current?.attributes?.["sip.call_status"] ||
+      "";
+
+    console.log("KUZYA WAIT_FOR_CALL_END STATUS:", {
+      identity,
+      status,
+      attributes: current.attributes
+    });
+
+    if (
+      ["hangup", "disconnected", "ended", "inactive"].includes(
+        String(status).toLowerCase()
+      )
+    ) {
+      return {
+        ended: true,
+        reason: `sip_status_${status}`,
+        identity,
+        attributes: current.attributes
+      };
+    }
+
+    await sleep(1000);
+  }
+
+  return {
+    ended: false,
+    reason: "call_end_wait_timeout",
+    identity,
+    attributes: null
+  };
+}
+
+class KuzyaAgent extends voice.Agent {
+  constructor(chatCtx, instructions, tools = {}) {
+    super({
+      chatCtx,
+      instructions,
+      tools
+    });
+  }
+}
+
+export default defineAgent({
+  entry: async (ctx) => {
+    const metadata = safeJsonParse(ctx.job?.metadata);
+
+    const instruction =
+      cleanText(metadata.instruction) ||
+      "Скажи: я на связи. Это исходящий звонок Кузи через LiveKit.";
+
+    const phoneNumber = cleanText(metadata.phoneNumber);
+    const callSessionId = cleanText(metadata.callSessionId || "");
+    const normalizedPhone = normalizePhoneForMemory(phoneNumber);
+
+    const [agentStateSummary, callSession, recentInteractions] = await Promise.all([
+      sbGetAgentState(KUZYA_OWNER_USER_ID),
+      sbGetCallSession(callSessionId),
+      sbGetRecentKuziaInteractions(8)
+    ]);
+
+    const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
+
+    const runtimeInstructions = buildCallInstructions(metadata, {
+      agentStateSummary,
+      callSession,
+      recentInteractionsText
+    });
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "voice_agent_started",
+        summary: "Голосовой Кузя стартовал с общим состоянием, связанной записью звонка и последними событиями общей истории.",
+        self_review: "Звонок воспринимается как часть единого Кузи между Telegram и голосовым каналом, а не как отдельный изолированный бот.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          voiceAgentStartedAt: new Date().toISOString(),
+          hasAgentState: Boolean(agentStateSummary),
+          hasCallSession: Boolean(callSession),
+          recentInteractionsCount: recentInteractions.length,
+          oneKuzyaBridge: true
         }
-      }
-    };
-
-    const acceptRes = await fetch(
-      `https://api.openai.com/v1/realtime/calls/${callId}/accept`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(acceptBody)
-      }
-    );
-
-    const acceptText = await acceptRes.text();
-
-    if (!acceptRes.ok) {
-      console.error("OpenAI realtime accept error:", acceptRes.status, acceptText);
-      return res.status(200).json({
-        ok: false,
-        accept_status: acceptRes.status,
-        accept_error: acceptText
       });
     }
 
-    console.log("OpenAI realtime call accepted:", callId);
+    await sbLogKuziaInteraction({
+      stimulus: instruction,
+      response: "Голосовой агент LiveKit запущен и получил общий контекст Кузи перед звонком.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "voice_agent_started",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Голосовой Кузя стартовал с общим состоянием, последними взаимодействиями и связанной записью звонка.",
+      selfReview: "Этот запуск должен восприниматься как продолжение единой истории Кузи между Telegram и голосовыми звонками.",
+      nextAction: "После звонка сохранить итог и самоанализ.",
+      importance: 4,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        hasAgentState: Boolean(agentStateSummary),
+        hasCallSession: Boolean(callSession),
+        recentInteractionsCount: recentInteractions.length
+      }
+    });
 
-    if (pendingRealtimeOutboundCall) {
-      pendingRealtimeOutboundCall.callId = callId;
+    console.log("KUZYA LIVEKIT AGENT START:", {
+      roomName: ctx.room?.name,
+      phoneNumber,
+      normalizedPhone,
+      callSessionId,
+      instruction,
+      source: metadata.source,
+      chatId: metadata.chatId,
+      userId: metadata.userId,
+      hasAgentState: Boolean(agentStateSummary),
+      hasCallSession: Boolean(callSession),
+      recentInteractionsCount: recentInteractions.length
+    });
+
+    const initialCtx = llm.ChatContext.empty();
+
+    initialCtx.addMessage({
+      role: "system",
+      content: `Задача звонка от Юли: ${instruction}`
+    });
+
+    await ctx.connect();
+
+    const session = new voice.AgentSession({
+      llm: new openai.realtime.RealtimeModel({
+        model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime",
+        voice: process.env.OPENAI_REALTIME_VOICE || "verse"
+      })
+    });
+
+    const livekitHttpUrl = getLiveKitHttpUrl();
+
+    const roomService =
+      livekitHttpUrl && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET
+        ? new RoomServiceClient(
+            livekitHttpUrl,
+            process.env.LIVEKIT_API_KEY,
+            process.env.LIVEKIT_API_SECRET
+          )
+        : null;
+
+    let hangupStarted = false;
+
+    const endCall = llm.tool({
+      description:
+        "Physically end the current phone call ONLY after the caller explicitly says goodbye, such as пока, до свидания, бувай, до побачення, or clearly asks to end the call. Do not use this tool merely because the task is completed, after a pause, or after спасибо/хорошо/ладно without an explicit goodbye.",
+      parameters: z.object({
+        reason: z.string().optional()
+      }),
+      execute: async ({ reason }) => {
+        if (hangupStarted) {
+          return {
+            ok: true,
+            alreadyStarted: true
+          };
+        }
+
+        hangupStarted = true;
+
+        await sbLogKuziaInteraction({
+          stimulus: "Farewell detected. endCall tool invoked.",
+          response: "Кузя получил сигнал завершить разговор и начал физическое завершение звонка.",
+          channel: "outbound_call",
+          direction: "internal",
+          eventType: "hangup_requested",
+          callSessionId: callSessionId || null,
+          telegramChatId: metadata.chatId || null,
+          telegramUserId: metadata.userId || null,
+          normalizedPhone,
+          summary: "Кузя вызвал endCall после прощания собеседника.",
+          selfReview: "Это первый слой физического завершения звонка после речевого прощания.",
+          nextAction: "Удалить LiveKit room через RoomServiceClient.deleteRoom.",
+          importance: 4,
+          metadata: {
+            source: metadata.source || "unknown",
+            roomName: ctx.room?.name || null,
+            phoneNumber,
+            reason: reason || "farewell"
+          }
+        });
+
+        if (callSessionId) {
+          await sbUpdateCallSession(callSessionId, {
+            status: "hangup_requested",
+            summary: "Кузя получил прощание и начал физическое завершение звонка.",
+            self_review: "endCall вызван после прощания. Следующий шаг — удалить LiveKit room.",
+            metadata: {
+              ...(callSession?.metadata || {}),
+              hangupRequestedAt: new Date().toISOString(),
+              hangupReason: reason || "farewell",
+              oneKuzyaBridge: true
+            }
+          });
+        }
+
+        await sleep(1000);
+
+        if (!roomService || !ctx.room?.name) {
+          console.error("KUZYA_END_CALL_NO_ROOM_SERVICE_OR_ROOM", {
+            hasRoomService: Boolean(roomService),
+            roomName: ctx.room?.name || null
+          });
+
+          return {
+            ok: false,
+            error: "room_service_or_room_missing"
+          };
+        }
+
+        try {
+          await withTimeout(
+            roomService.deleteRoom(ctx.room.name),
+            5000,
+            "LiveKit deleteRoom"
+          );
+
+          await sbLogKuziaInteraction({
+            stimulus: "LiveKit room deleted by endCall.",
+            response: "Кузя физически завершил звонок через удаление LiveKit room.",
+            channel: "outbound_call",
+            direction: "internal",
+            eventType: "physical_hangup_completed",
+            callSessionId: callSessionId || null,
+            telegramChatId: metadata.chatId || null,
+            telegramUserId: metadata.userId || null,
+            normalizedPhone,
+            summary: "LiveKit room удалена, звонок физически завершён.",
+            selfReview: "Кузя не просто замолчал после прощания, а выполнил физическое завершение звонка.",
+            nextAction: "",
+            importance: 5,
+            metadata: {
+              source: metadata.source || "unknown",
+              roomName: ctx.room?.name || null,
+              phoneNumber,
+              reason: reason || "farewell"
+            }
+          });
+
+          return {
+            ok: true,
+            action: "room_deleted",
+            room: ctx.room.name
+          };
+        } catch (e) {
+          console.error("KUZYA_END_CALL_DELETE_ROOM_ERROR:", e);
+
+          await sbLogKuziaInteraction({
+            stimulus: "LiveKit deleteRoom failed.",
+            response: "Кузя попытался физически завершить звонок, но deleteRoom вернул ошибку.",
+            channel: "outbound_call",
+            direction: "internal",
+            eventType: "physical_hangup_failed",
+            callSessionId: callSessionId || null,
+            telegramChatId: metadata.chatId || null,
+            telegramUserId: metadata.userId || null,
+            normalizedPhone,
+            summary: "Физическое завершение звонка не удалось.",
+            selfReview: "Нужно проверить LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET или права RoomServiceClient.",
+            nextAction: "Проверить Render logs по KУZYA_END_CALL_DELETE_ROOM_ERROR.",
+            importance: 4,
+            metadata: {
+              source: metadata.source || "unknown",
+              roomName: ctx.room?.name || null,
+              phoneNumber,
+              error: e?.message || String(e)
+            }
+          });
+
+          return {
+            ok: false,
+            error: e?.message || String(e)
+          };
+        }
+      }
+    });
+
+    await session.start({
+      room: ctx.room,
+      agent: new KuzyaAgent(initialCtx, runtimeInstructions, {
+        endCall
+      })
+    });
+
+    let participant;
+
+    try {
+      participant = await ctx.waitForParticipant();
+    } catch (e) {
+      console.error("KUZYA WAIT_FOR_PARTICIPANT_FAILED:", e);
+
+      if (callSessionId) {
+        await sbUpdateCallSession(callSessionId, {
+          status: "room_disconnected_before_participant",
+          summary: "LiveKit-комната закрылась до появления телефонного участника.",
+          self_review: "Звонок не дошёл до стадии активного разговора: участник не появился в комнате до её закрытия.",
+          metadata: {
+            ...(callSession?.metadata || {}),
+            participantWaitFailedAt: new Date().toISOString(),
+            participantWaitError: e?.message || String(e),
+            oneKuzyaBridge: true
+          }
+        });
+      }
+
+      await sbLogKuziaInteraction({
+        stimulus: "waitForParticipant failed.",
+        response: "LiveKit-комната закрылась до появления телефонного участника.",
+        channel: "outbound_call",
+        direction: "internal",
+        eventType: "room_disconnected_before_participant",
+        callSessionId: callSessionId || null,
+        telegramChatId: metadata.chatId || null,
+        telegramUserId: metadata.userId || null,
+        normalizedPhone,
+        summary: "Звонок не дошёл до стадии участника: комната отключилась во время ожидания participant.",
+        selfReview: "Кузя корректно зафиксировал неуспешную попытку звонка вместо падения без записи.",
+        nextAction: "Проверить SIP/LiveKit-соединение или повторить звонок.",
+        importance: 3,
+        metadata: {
+          source: metadata.source || "unknown",
+          roomName: ctx.room?.name || null,
+          phoneNumber,
+          error: e?.message || String(e)
+        }
+      });
+
+      return;
     }
 
-    return res.status(200).json({
-      ok: true,
-      accepted: true,
-      callId,
-      incomingPhone: incomingPhone || null,
-      inboundCallSessionId: inboundLink?.inbound?.id || null,
-      relatedOutboundId: inboundLink?.relatedOutbound?.id || null
+    console.log("KUZYA LIVEKIT PARTICIPANT JOINED:", {
+      identity: participant.identity,
+      kind: participant.kind,
+      attributes: participant.attributes
     });
-  } catch (e) {
-    console.error("OpenAI realtime webhook exception:", e);
-    return res.status(200).json({ ok: false, error: "exception" });
+
+    await sbLogKuziaInteraction({
+      stimulus: "Before waitForSipActive.",
+      response: "Голосовой Кузя дошёл до ожидания реального поднятия трубки.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "before_wait_for_sip_active",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Кузя начал ждать sip.callStatus=active перед первой голосовой репликой.",
+      selfReview: "Диагностическая метка: код дошёл до waitForSipActive.",
+      nextAction: "Дождаться active и записать after_wait_for_sip_active.",
+      importance: 2,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        participantIdentity: participant?.identity || null,
+        participantAttributes: participant?.attributes || null
+      }
+    });
+
+    const activeParticipant = await waitForSipActive(ctx, participant);
+
+    await sbLogKuziaInteraction({
+      stimulus: "After waitForSipActive.",
+      response: "waitForSipActive завершился, голосовой Кузя продолжает сценарий звонка.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "after_wait_for_sip_active",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Кузя вышел из ожидания sip.callStatus=active.",
+      selfReview: "Диагностическая метка: waitForSipActive вернулся и код пошёл дальше.",
+      nextAction: "Записать call_answered и отправить первую реплику.",
+      importance: 2,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        participantIdentity: activeParticipant?.identity || null,
+        participantAttributes: activeParticipant?.attributes || null
+      }
+    });
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "answered",
+        summary: "Собеседник поднял трубку. Голосовой Кузя получил активное соединение и готов начать разговор.",
+        self_review: "Кузя корректно дождался реального поднятия трубки перед первой репликой.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          answeredAt: new Date().toISOString(),
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: "SIP call became active.",
+      response: "Собеседник поднял трубку, голосовой Кузя начинает разговор.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: "call_answered",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Исходящий звонок стал активным: трубку подняли.",
+      selfReview: "Кузя не начал говорить до поднятия трубки, связь с call_session сохранена.",
+      nextAction: "Сказать первую короткую фразу и выполнить задачу звонка.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber
+      }
+    });
+
+    await session.generateReply({
+      instructions: `
+Человек поднял трубку.
+
+Начни разговор сразу.
+Начни ровно так: "Алло, алло, это Кузя." Потом сразу продолжи задачу без паузы.
+Не делай паузу после первого "Алло".
+Не растягивай "Алло".
+Не используй многоточия.
+Не растягивай ответ.
+Не делай длинные паузы между предложениями.
+Лучше одно короткое предложение, чем несколько фраз с паузами.
+Не читай задачу дословно.
+Не повторяйся.
+Не говори технические слова.
+Не говори про базу, session, Supabase, call_sessions, LiveKit, Zadarma или логи.
+Если собеседник явно прощается словами "пока", "до свидания", "бувай", "до побачення" — коротко попрощайся и вызови endCall.
+Если задача выполнена, но явного прощания нет — не завершай звонок сам, скажи коротко, что ты ещё на связи.
+
+Если собеседник отвечает по-украински, дальше говори по-украински.
+Если собеседник отвечает по-русски, говори по-русски.
+Если собеседник смешивает языки, подстраивайся под последнюю фразу.
+
+Выполни задачу своими словами.
+
+Задача:
+${instruction}
+`
+    });
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: "initial_reply_sent",
+        summary: "Кузя дождался поднятия трубки и отправил первую голосовую реплику по задаче звонка.",
+        self_review: "Первый голосовой шаг выполнен: Кузя стартовал не как отдельный бот, а как часть единого контекста Telegram + звонок.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          initialReplySentAt: new Date().toISOString(),
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: instruction,
+      response: "Кузя отправил первую голосовую реплику после поднятия трубки.",
+      channel: "outbound_call",
+      direction: "outgoing",
+      eventType: "initial_voice_reply_sent",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: "Первая голосовая реплика в исходящем звонке отправлена после поднятия трубки.",
+      selfReview: "Кузя выполнил правильный порядок: сначала дождался active, затем начал разговор.",
+      nextAction: "После полноценной расшифровки звонков добавить итог разговора и глубокий self_review.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber
+      }
+    });
+
+    const callEnd = await waitForCallEnd(
+      ctx,
+      activeParticipant || participant,
+      15 * 60 * 1000
+    );
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: callEnd.ended ? "ended" : "end_wait_timeout",
+        summary: callEnd.ended
+          ? "Звонок завершён: участник отключился или SIP-статус показал завершение."
+          : "Кузя не получил явный сигнал завершения звонка в пределах времени ожидания.",
+        self_review: callEnd.ended
+          ? "Кузя корректно зафиксировал завершение звонка как часть единой истории Telegram + голос."
+          : "Нужна дополнительная проверка механизма завершения звонка: явный конец не был пойман.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          callEndedAt: new Date().toISOString(),
+          callEndReason: callEnd.reason,
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: "Call ended or call-end wait finished.",
+      response: callEnd.ended
+        ? "Голосовой звонок завершён."
+        : "Ожидание завершения звонка истекло без явного сигнала.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: callEnd.ended ? "call_ended" : "call_end_wait_timeout",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: callEnd.ended
+        ? "Исходящий звонок завершён и записан в общий журнал Кузи."
+        : "Кузя не получил явный сигнал завершения звонка за время ожидания.",
+      selfReview: callEnd.ended
+        ? "Теперь у Кузи есть полный технический каркас звонка: старт, ожидание трубки, active, первая реплика, завершение."
+        : "Следующий шаг — уточнить способ определения конца звонка через LiveKit/SIP.",
+      nextAction: "На следующем слое добавить краткий итог разговора и более глубокий self_review.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        callEndReason: callEnd.reason,
+        participantIdentity: callEnd.identity || null,
+        participantAttributes: callEnd.attributes || null
+      }
+    });
+
+    await sbLogKuziaEvolution(
+      callEnd.ended
+        ? [
+            "Звонок завершён корректно.",
+            "Кузя прошёл полный исходящий голосовой цикл: старт агента, получение общего контекста, ожидание поднятия трубки, active-состояние, первая реплика, завершение звонка.",
+            "Вывод: связка Telegram → call_sessions → agent.js → kuzia_interactions работает как единый контур Кузи.",
+            "Следующий слой: добавить содержательный итог разговора после появления расшифровки звонка."
+          ].join("\n")
+        : [
+            "Звонок не дал явного события завершения в пределах ожидания.",
+            "Кузя прошёл старт и первую реплику, но конец звонка был определён неуверенно.",
+            "Вывод: нужно уточнить механизм определения завершения звонка через LiveKit/SIP.",
+            "Следующий слой: проверить call_end_wait_timeout и способ закрытия комнаты."
+          ].join("\n")
+    );
+
+    await tgSendMessage(
+      metadata.chatId,
+      callEnd.ended
+        ? [
+            "📞 Звонок завершён.",
+            `Номер: ${phoneNumber || "не передан"}`,
+            "Статус: трубку подняли, первая реплика отправлена, звонок завершён.",
+            "Кузя записал событие и self-review."
+          ].join("\n")
+        : [
+            "⚠️ Звонок не дал явного сигнала завершения.",
+            `Номер: ${phoneNumber || "не передан"}`,
+            "Кузя записал это как call_end_wait_timeout.",
+            "Нужно будет проверить механизм завершения звонка."
+          ].join("\n")
+    );
   }
 });
 
-// ---------- START ----------
-app.listen(PORT, () => {
-  console.log(`Кузя запущен на порту ${PORT}`);
-});
+cli.runApp(
+  new ServerOptions({
+    agent: fileURLToPath(import.meta.url),
+    agentName: "kuzya-agent"
+  })
+);
