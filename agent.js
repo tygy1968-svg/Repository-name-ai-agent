@@ -466,6 +466,60 @@ async function waitForSipActive(ctx, participant, timeoutMs = 45000) {
   return current;
 }
 
+async function waitForCallEnd(ctx, participant, timeoutMs = 15 * 60 * 1000) {
+  const start = Date.now();
+  const identity = participant?.identity;
+
+  while (Date.now() - start < timeoutMs) {
+    const current =
+      identity && ctx.room?.remoteParticipants?.get?.(identity)
+        ? ctx.room.remoteParticipants.get(identity)
+        : null;
+
+    if (!current) {
+      return {
+        ended: true,
+        reason: "participant_disconnected",
+        identity,
+        attributes: null
+      };
+    }
+
+    const status =
+      current?.attributes?.["sip.callStatus"] ||
+      current?.attributes?.["sip.call_status"] ||
+      "";
+
+    console.log("KUZYA WAIT_FOR_CALL_END STATUS:", {
+      identity,
+      status,
+      attributes: current.attributes
+    });
+
+    if (
+      ["hangup", "disconnected", "ended", "inactive"].includes(
+        String(status).toLowerCase()
+      )
+    ) {
+      return {
+        ended: true,
+        reason: `sip_status_${status}`,
+        identity,
+        attributes: current.attributes
+      };
+    }
+
+    await sleep(1000);
+  }
+
+  return {
+    ended: false,
+    reason: "call_end_wait_timeout",
+    identity,
+    attributes: null
+  };
+}
+
 class KuzyaAgent extends voice.Agent {
   constructor(chatCtx, instructions) {
     super({
@@ -726,6 +780,60 @@ ${instruction}
         source: metadata.source || "unknown",
         roomName: ctx.room?.name || null,
         phoneNumber
+      }
+    });
+
+    const callEnd = await waitForCallEnd(
+      ctx,
+      activeParticipant || participant,
+      15 * 60 * 1000
+    );
+
+    if (callSessionId) {
+      await sbUpdateCallSession(callSessionId, {
+        status: callEnd.ended ? "ended" : "end_wait_timeout",
+        summary: callEnd.ended
+          ? "Звонок завершён: участник отключился или SIP-статус показал завершение."
+          : "Кузя не получил явный сигнал завершения звонка в пределах времени ожидания.",
+        self_review: callEnd.ended
+          ? "Кузя корректно зафиксировал завершение звонка как часть единой истории Telegram + голос."
+          : "Нужна дополнительная проверка механизма завершения звонка: явный конец не был пойман.",
+        metadata: {
+          ...(callSession?.metadata || {}),
+          callEndedAt: new Date().toISOString(),
+          callEndReason: callEnd.reason,
+          oneKuzyaBridge: true
+        }
+      });
+    }
+
+    await sbLogKuziaInteraction({
+      stimulus: "Call ended or call-end wait finished.",
+      response: callEnd.ended
+        ? "Голосовой звонок завершён."
+        : "Ожидание завершения звонка истекло без явного сигнала.",
+      channel: "outbound_call",
+      direction: "internal",
+      eventType: callEnd.ended ? "call_ended" : "call_end_wait_timeout",
+      callSessionId: callSessionId || null,
+      telegramChatId: metadata.chatId || null,
+      telegramUserId: metadata.userId || null,
+      normalizedPhone,
+      summary: callEnd.ended
+        ? "Исходящий звонок завершён и записан в общий журнал Кузи."
+        : "Кузя не получил явный сигнал завершения звонка за время ожидания.",
+      selfReview: callEnd.ended
+        ? "Теперь у Кузи есть полный технический каркас звонка: старт, ожидание трубки, active, первая реплика, завершение."
+        : "Следующий шаг — уточнить способ определения конца звонка через LiveKit/SIP.",
+      nextAction: "На следующем слое добавить краткий итог разговора и более глубокий self_review.",
+      importance: 3,
+      metadata: {
+        source: metadata.source || "unknown",
+        roomName: ctx.room?.name || null,
+        phoneNumber,
+        callEndReason: callEnd.reason,
+        participantIdentity: callEnd.identity || null,
+        participantAttributes: callEnd.attributes || null
       }
     });
   }
