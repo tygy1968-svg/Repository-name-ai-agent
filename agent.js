@@ -630,7 +630,51 @@ export default defineAgent({
       agent: new KuzyaAgent(initialCtx, runtimeInstructions)
     });
 
-    const participant = await ctx.waitForParticipant();
+    let participant;
+
+    try {
+      participant = await ctx.waitForParticipant();
+    } catch (e) {
+      console.error("KUZYA WAIT_FOR_PARTICIPANT_FAILED:", e);
+
+      if (callSessionId) {
+        await sbUpdateCallSession(callSessionId, {
+          status: "room_disconnected_before_participant",
+          summary: "LiveKit-комната закрылась до появления телефонного участника.",
+          self_review: "Звонок не дошёл до стадии активного разговора: участник не появился в комнате до её закрытия.",
+          metadata: {
+            ...(callSession?.metadata || {}),
+            participantWaitFailedAt: new Date().toISOString(),
+            participantWaitError: e?.message || String(e),
+            oneKuzyaBridge: true
+          }
+        });
+      }
+
+      await sbLogKuziaInteraction({
+        stimulus: "waitForParticipant failed.",
+        response: "LiveKit-комната закрылась до появления телефонного участника.",
+        channel: "outbound_call",
+        direction: "internal",
+        eventType: "room_disconnected_before_participant",
+        callSessionId: callSessionId || null,
+        telegramChatId: metadata.chatId || null,
+        telegramUserId: metadata.userId || null,
+        normalizedPhone,
+        summary: "Звонок не дошёл до стадии участника: комната отключилась во время ожидания participant.",
+        selfReview: "Кузя корректно зафиксировал неуспешную попытку звонка вместо падения без записи.",
+        nextAction: "Проверить SIP/LiveKit-соединение или повторить звонок.",
+        importance: 3,
+        metadata: {
+          source: metadata.source || "unknown",
+          roomName: ctx.room?.name || null,
+          phoneNumber,
+          error: e?.message || String(e)
+        }
+      });
+
+      return;
+    }
 
     console.log("KUZYA LIVEKIT PARTICIPANT JOINED:", {
       identity: participant.identity,
