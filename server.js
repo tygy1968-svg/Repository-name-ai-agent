@@ -480,6 +480,110 @@ async function sbUpdateCallSession(id, patch) {
   }
 }
 
+async function sbFindLatestOutboundCallByPhone(normalizedPhone) {
+  if (!normalizedPhone) return null;
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/find_latest_outbound_call_by_phone`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      p_normalized_phone: String(normalizedPhone)
+    })
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    console.error("find_latest_outbound_call_by_phone error:", res.status, text);
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(text);
+    return Array.isArray(data) && data.length > 0 ? data[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sbCreateLinkedInboundCallSession({
+  phoneNumber,
+  chatId,
+  userId,
+  source = "telegram-linktest",
+  metadata = {}
+}) {
+  const normalizedPhone = normalizePhoneForMemory(phoneNumber);
+  const relatedOutbound = await sbFindLatestOutboundCallByPhone(normalizedPhone);
+
+  const payload = [
+    {
+      direction: "inbound",
+      status: relatedOutbound ? "linked_to_previous_outbound" : "created_unlinked",
+      phone_number: phoneNumber,
+      normalized_phone: normalizedPhone,
+      telegram_chat_id: chatId ? String(chatId) : null,
+      telegram_user_id: userId ? String(userId) : null,
+      instruction: relatedOutbound
+        ? `Входящий перезвон связан с прошлым исходящим звонком. Прошлая задача: ${relatedOutbound.instruction || "не указана"}`
+        : "Входящий звонок без найденного предыдущего исходящего.",
+      room_name: null,
+      source,
+      related_call_session_id: relatedOutbound?.id || null,
+      relation_type: relatedOutbound ? "callback_after_outbound" : null,
+      linked_at: relatedOutbound ? new Date().toISOString() : null,
+      linked_reason: relatedOutbound
+        ? "Найден последний исходящий звонок по normalized_phone."
+        : "Предыдущий исходящий звонок по normalized_phone не найден.",
+      summary: relatedOutbound
+        ? "Создана тестовая входящая call_session, связанная с последним исходящим звонком по номеру."
+        : "Создана тестовая входящая call_session без связи с исходящим.",
+      self_review: relatedOutbound
+        ? "Кузя сможет воспринимать входящий звонок как продолжение предыдущего исходящего контакта."
+        : "Для этого номера пока нет найденного исходящего контекста.",
+      metadata: {
+        ...metadata,
+        normalizedPhone,
+        relatedOutboundId: relatedOutbound?.id || null,
+        relatedOutboundInstruction: relatedOutbound?.instruction || null
+      }
+    }
+  ];
+
+  const res = await fetch(SUPABASE_CALL_SESSIONS_URL, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    console.error("Supabase linked inbound create error:", res.status, text);
+    return {
+      inbound: null,
+      relatedOutbound,
+      error: text
+    };
+  }
+
+  const data = JSON.parse(text);
+  return {
+    inbound: Array.isArray(data) ? data[0] : null,
+    relatedOutbound,
+    error: null
+  };
+}
+
 // ---------- OPENAI ----------
 async function createEmbedding(text) {
   const res = await fetch("https://api.openai.com/v1/embeddings", {
@@ -1392,6 +1496,83 @@ app.post("/webhook", async (req, res) => {
             chatId,
             "❌ Ошибка LiveKit test call. Смотри Render logs."
           );
+        }
+
+        return;
+      }
+
+      // --- INBOUND LINK TEST COMMAND ---
+      if (text.startsWith("/linktest")) {
+        const parsed = extractPhoneAndInstruction(text, "linktest");
+        const phoneNumber = parsed.phoneNumber;
+
+        if (!phoneNumber) {
+          await tgSendMessage(
+            chatId,
+            "Используй: /linktest +380XXXXXXXXX"
+          );
+          return;
+        }
+
+        try {
+          const result = await sbCreateLinkedInboundCallSession({
+            phoneNumber,
+            chatId,
+            userId,
+            source: "telegram-linktest",
+            metadata: {
+              sourceCommand: text,
+              testOnly: true
+            }
+          });
+
+          await sbLogKuziaInteraction({
+            userId: "yulia",
+            stimulus: text,
+            response: result.relatedOutbound
+              ? `Создана тестовая inbound call_session и связана с outbound ${result.relatedOutbound.id}.`
+              : "Создана тестовая inbound call_session, но связанный outbound не найден.",
+            channel: "inbound_call",
+            direction: "incoming",
+            eventType: "inbound_linktest_created",
+            callSessionId: result.inbound?.id || null,
+            telegramChatId: chatId,
+            telegramUserId: userId,
+            normalizedPhone: normalizePhoneForMemory(phoneNumber),
+            summary: result.relatedOutbound
+              ? "Тестовая входящая сессия связана с последним исходящим звонком по normalized_phone."
+              : "Тестовая входящая сессия создана без найденной связи.",
+            selfReview: result.relatedOutbound
+              ? "Связь входящий → последний исходящий работает на уровне базы и server.js."
+              : "Для номера не найден предыдущий outbound, связь не создана.",
+            nextAction: "После проверки подключить эту логику к настоящему входящему звонку.",
+            importance: 4,
+            metadata: {
+              inboundCallSessionId: result.inbound?.id || null,
+              relatedOutboundId: result.relatedOutbound?.id || null,
+              error: result.error || null
+            }
+          });
+
+          await tgSendMessage(
+            chatId,
+            result.relatedOutbound
+              ? [
+                  "✅ Link test создан.",
+                  `Номер: ${normalizeLiveKitPhone(phoneNumber)}`,
+                  `Inbound session: ${result.inbound?.id || "null"}`,
+                  `Связан с outbound: ${result.relatedOutbound.id}`,
+                  "Кузя сможет понимать такой входящий как продолжение прошлого звонка."
+                ].join("\n")
+              : [
+                  "⚠️ Link test создан, но прошлый outbound не найден.",
+                  `Номер: ${normalizeLiveKitPhone(phoneNumber)}`,
+                  `Inbound session: ${result.inbound?.id || "null"}`
+                ].join("\n")
+          );
+        } catch (err) {
+          console.error("linktest error:", err);
+          await tgSendMessage(chatId, "❌ Ошибка /linktest. Смотри Render logs.");
         }
 
         return;
