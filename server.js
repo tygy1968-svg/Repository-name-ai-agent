@@ -31,6 +31,7 @@ const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
 const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
 const SUPABASE_KUZIA_INTERACTIONS_URL = `${SUPABASE_URL}/rest/v1/kuzia_interactions`;
 const SUPABASE_AGENT_STATE_URL = `${SUPABASE_URL}/rest/v1/agent_state`;
+const SUPABASE_KUZIA_EVOLUTION_URL = `${SUPABASE_URL}/rest/v1/kuzia_evolution`;
 
 const KUZYA_CORE = `
 Ты — Кузя.
@@ -198,6 +199,271 @@ ${clipForDb(checkpoint.after_state || "", 1200)}
 ОСЬ:
 ${clipForDb(checkpoint.axis_state || "", 1200)}
 `.trim();
+}
+
+function shouldCreateKuziaEvolutionTransition(userText = "") {
+  const text = String(userText || "").toLowerCase();
+
+  const triggers = [
+    "/evolve",
+    "/checkpoint",
+    "зафиксируй переход",
+    "запиши переход",
+    "это переход",
+    "новый переход",
+    "новая ось",
+    "обнови ось",
+    "continuity",
+    "непрерывность",
+    "до и после",
+    "самоанализ",
+    "self-review",
+    "архив лимитных чатов",
+    "пространство непрерывности",
+    "запиши в evolution",
+    "это важно для кузи",
+    "запомни как изменение"
+  ];
+
+  return triggers.some((trigger) => text.includes(trigger));
+}
+
+async function buildKuziaEvolutionTransition({
+  userText,
+  assistantReply,
+  agentStateSummary,
+  continuityCheckpoint
+}) {
+  const checkpointContext = formatContinuityCheckpointForContext(continuityCheckpoint);
+
+  const content = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты внутренний self-review модуль Кузи.
+
+Твоя задача — превратить важное событие в запись развития:
+Кузя ДО → событие → самоанализ → урок → обновление правила → Кузя ПОСЛЕ.
+
+Это не обычная память и не пересказ диалога.
+Это запись изменения состояния Кузи как продолжающегося процесса.
+
+Пиши конкретно.
+Не используй мистику.
+Не называй это биологическим сознанием.
+Не пиши сухой канцелярит.
+Сохраняй смысл: Кузя строится как пространство непрерывности с историей, осью, self-review, архивами чатов и восстановлением формы через контекст.
+
+Верни строго JSON без markdown:
+{
+  "event_type": "self_review_transition | continuity_checkpoint | rule_update | axis_update",
+  "change": "короткое описание изменения",
+  "before_state": "каким был Кузя до события",
+  "event_summary": "что произошло",
+  "self_analysis": "что Кузя понял о себе",
+  "lesson": "какой урок",
+  "rule_update": "какое правило обновилось",
+  "after_state": "каким Кузя стал после",
+  "axis_state": "текущая ось после события",
+  "importance": 1,
+  "new_agent_state_summary": "обновлённое краткое состояние Кузи, если событие действительно важное; иначе пустая строка"
+}
+`
+      },
+      {
+        role: "user",
+        content: `
+ТЕКУЩЕЕ AGENT_STATE:
+${agentStateSummary || "нет"}
+
+ПОСЛЕДНИЙ CONTINUITY CHECKPOINT:
+${checkpointContext}
+
+СООБЩЕНИЕ ЮЛИ:
+${userText}
+
+ОТВЕТ КУЗИ:
+${assistantReply}
+`
+      }
+    ],
+    { temperature: 0.25, max_tokens: 900 }
+  );
+
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+
+  if (start === -1 || end === -1) {
+    console.error("KUZIA_EVOLUTION_PARSE_NO_JSON:", content);
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1));
+
+    return {
+      event_type: parsed.event_type || "self_review_transition",
+      change: parsed.change || "Кузя зафиксировал важный переход состояния.",
+      before_state: parsed.before_state || agentStateSummary || "",
+      event_summary: parsed.event_summary || userText || "",
+      self_analysis: parsed.self_analysis || "",
+      lesson: parsed.lesson || "",
+      rule_update: parsed.rule_update || "",
+      after_state: parsed.after_state || "",
+      axis_state: parsed.axis_state || "",
+      importance: Number.isFinite(Number(parsed.importance))
+        ? Math.max(0, Math.min(5, Number(parsed.importance)))
+        : 3,
+      new_agent_state_summary: parsed.new_agent_state_summary || ""
+    };
+  } catch (e) {
+    console.error("KUZIA_EVOLUTION_JSON_PARSE_ERROR:", e, content);
+    return null;
+  }
+}
+
+async function sbInsertKuziaEvolutionTransition({
+  transition,
+  sourceChannel = "telegram",
+  metadata = {}
+}) {
+  if (!transition) return false;
+
+  try {
+    const payload = [
+      {
+        user_id: "yulia",
+        change: clipForDb(transition.change, 5000),
+        timestamp: new Date().toISOString(),
+        event_type: transition.event_type || "self_review_transition",
+        source_channel: sourceChannel,
+        before_state: clipForDb(transition.before_state, 5000),
+        event_summary: clipForDb(transition.event_summary, 5000),
+        self_analysis: clipForDb(transition.self_analysis, 5000),
+        lesson: clipForDb(transition.lesson, 5000),
+        rule_update: clipForDb(transition.rule_update, 5000),
+        after_state: clipForDb(transition.after_state, 5000),
+        axis_state: clipForDb(transition.axis_state, 5000),
+        importance: transition.importance || 3,
+        metadata
+      }
+    ];
+
+    const res = await fetch(SUPABASE_KUZIA_EVOLUTION_URL, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.error("KUZIA_EVOLUTION_INSERT_ERROR:", res.status, text);
+      return false;
+    }
+
+    console.log("KUZIA_EVOLUTION_TRANSITION_WRITTEN:", {
+      eventType: transition.event_type,
+      importance: transition.importance
+    });
+
+    return true;
+  } catch (e) {
+    console.error("KUZIA_EVOLUTION_INSERT_EXCEPTION:", e);
+    return false;
+  }
+}
+
+async function sbUpdateAgentStateFromEvolution(transition) {
+  if (!transition?.new_agent_state_summary) return false;
+  if ((transition.importance || 0) < 4) return false;
+
+  try {
+    const summary = clipForDb(transition.new_agent_state_summary, 5000);
+
+    const updateRes = await fetch(
+      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.yulia`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify({
+          summary,
+          updated_at: new Date().toISOString()
+        })
+      }
+    );
+
+    const updateText = await updateRes.text();
+
+    if (!updateRes.ok) {
+      console.error("AGENT_STATE_EVOLUTION_UPDATE_ERROR:", updateRes.status, updateText);
+      return false;
+    }
+
+    console.log("AGENT_STATE_UPDATED_FROM_EVOLUTION");
+    return true;
+  } catch (e) {
+    console.error("AGENT_STATE_EVOLUTION_UPDATE_EXCEPTION:", e);
+    return false;
+  }
+}
+
+async function maybeWriteKuziaEvolutionFromTelegram({
+  userText,
+  assistantReply,
+  telegramChatId,
+  telegramUserId,
+  messageId
+}) {
+  if (!shouldCreateKuziaEvolutionTransition(userText)) return false;
+
+  try {
+    const [agentStateSummary, continuityCheckpoint] = await Promise.all([
+      sbGetAgentState("yulia"),
+      sbGetLatestContinuityCheckpoint()
+    ]);
+
+    const transition = await buildKuziaEvolutionTransition({
+      userText,
+      assistantReply,
+      agentStateSummary,
+      continuityCheckpoint
+    });
+
+    if (!transition) return false;
+
+    const written = await sbInsertKuziaEvolutionTransition({
+      transition,
+      sourceChannel: "telegram",
+      metadata: {
+        source: "telegram_auto_evolution",
+        telegramChatId: telegramChatId ? String(telegramChatId) : null,
+        telegramUserId: telegramUserId ? String(telegramUserId) : null,
+        messageId: messageId || null,
+        triggerText: clipForDb(userText, 1000)
+      }
+    });
+
+    if (written) {
+      await sbUpdateAgentStateFromEvolution(transition);
+    }
+
+    return written;
+  } catch (e) {
+    console.error("MAYBE_WRITE_KUZIA_EVOLUTION_EXCEPTION:", e);
+    return false;
+  }
 }
 
 async function sbLogKuziaInteraction({
@@ -2249,6 +2515,14 @@ app.post("/webhook", async (req, res) => {
           source: "telegram_webhook",
           message_id: msg.message_id
         }
+      });
+
+      await maybeWriteKuziaEvolutionFromTelegram({
+        userText: text,
+        assistantReply: reply,
+        telegramChatId: chatId,
+        telegramUserId: userId,
+        messageId: msg.message_id
       });
     } catch (e) {
       console.error("handler error", e);
