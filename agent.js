@@ -437,6 +437,45 @@ async function tgSendMessage(chatId, text) {
   }
 }
 
+function formatVoiceCallPlanForPrompt(plan) {
+  if (!plan || typeof plan !== "object") return "нет";
+
+  const steps = Array.isArray(plan.steps)
+    ? plan.steps.slice(0, 4).map((s, i) => `${i + 1}. ${String(s)}`).join("\n")
+    : "";
+
+  const avoid = Array.isArray(plan.avoid)
+    ? plan.avoid.slice(0, 5).map((s) => `— ${String(s)}`).join("\n")
+    : "";
+
+  return `
+Тип звонка: ${plan.call_type || "не указан"}
+Адресат: ${plan.recipient || "не указан"}
+Язык: ${plan.language || "auto"}
+
+Первая фраза:
+${plan.opening || "не указана"}
+
+Цель:
+${plan.goal || "не указана"}
+
+Шаги:
+${steps || "нет"}
+
+Нормальный результат:
+${plan.success_result || "не указан"}
+
+Чего избегать:
+${avoid || "нет"}
+
+После выполнения задачи:
+${plan.after_task || "Остаться на связи."}
+
+Правило завершения:
+${plan.hangup_rule || "Завершать только после явного прощания."}
+`.trim();
+}
+
 function buildCallInstructions(
   metadata,
   {
@@ -451,6 +490,7 @@ function buildCallInstructions(
   const chatId = cleanText(metadata.chatId || "");
   const userId = cleanText(metadata.userId || "");
   const callSessionId = cleanText(metadata.callSessionId || "");
+  const voiceCallPlanText = formatVoiceCallPlanForPrompt(metadata.voiceCallPlan);
 
   const callSessionContext = callSession
     ? `
@@ -503,6 +543,13 @@ ${callSessionContext}
 
 Задача звонка:
 ${instruction || "Отдельная задача не передана. Скажи коротко, что ты на связи."}
+
+ВНУТРЕННИЙ ПЛАН ЗВОНКА:
+${voiceCallPlanText}
+
+Этот план НЕ надо читать вслух.
+Используй его как понимание задачи.
+Говори естественно и коротко.
 
 Правила именно для этого звонка:
 — НЕ говори, пока человек реально не поднял трубку;
@@ -708,7 +755,8 @@ export default defineAgent({
       userId: metadata.userId,
       hasAgentState: Boolean(agentStateSummary),
       hasCallSession: Boolean(callSession),
-      recentInteractionsCount: recentInteractions.length
+      recentInteractionsCount: recentInteractions.length,
+      hasVoiceCallPlan: Boolean(metadata.voiceCallPlan)
     });
 
     const initialCtx = llm.ChatContext.empty();
