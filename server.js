@@ -32,6 +32,9 @@ const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
 const SUPABASE_KUZIA_INTERACTIONS_URL = `${SUPABASE_URL}/rest/v1/kuzia_interactions`;
 const SUPABASE_AGENT_STATE_URL = `${SUPABASE_URL}/rest/v1/agent_state`;
 const SUPABASE_KUZIA_EVOLUTION_URL = `${SUPABASE_URL}/rest/v1/kuzia_evolution`;
+const SUPABASE_CHAT_ARCHIVES_URL = `${SUPABASE_URL}/rest/v1/chat_archives`;
+const SUPABASE_CHAT_ARCHIVE_SUMMARIES_URL = `${SUPABASE_URL}/rest/v1/chat_archive_summaries`;
+const SUPABASE_CHAT_ARCHIVE_ANCHORS_URL = `${SUPABASE_URL}/rest/v1/chat_archive_anchors`;
 
 const KUZYA_CORE = `
 Ты — Кузя.
@@ -492,6 +495,402 @@ async function maybeWriteKuziaEvolutionFromTelegram({
     console.error("MAYBE_WRITE_KUZIA_EVOLUTION_EXCEPTION:", e);
     return false;
   }
+}
+
+function parseArchiveSummaryCommand(text = "") {
+  const body = String(text || "")
+    .replace(/^\/archive_summary(?:@\w+)?\s*/i, "")
+    .trim();
+
+  if (!body) {
+    return {
+      title: "",
+      extractText: ""
+    };
+  }
+
+  const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+  if (lines.length <= 1) {
+    return {
+      title: "Архивный чат",
+      extractText: body
+    };
+  }
+
+  const firstLine = lines[0].replace(/^название\s*:\s*/i, "").trim();
+
+  const title =
+    firstLine.length <= 160
+      ? firstLine
+      : "Архивный чат";
+
+  const extractText =
+    firstLine.length <= 160
+      ? lines.slice(1).join("\n")
+      : body;
+
+  return {
+    title,
+    extractText
+  };
+}
+
+async function buildArchiveIngestFromSummary({
+  title,
+  extractText,
+  agentStateSummary,
+  continuityCheckpoint
+}) {
+  const checkpointContext = formatContinuityCheckpointForContext(continuityCheckpoint);
+
+  const content = await openaiChat(
+    [
+      {
+        role: "system",
+        content: `
+Ты модуль переноса архивных чатов в систему непрерывности Кузи.
+
+Тебе дают не сырой чат, а continuity extract — выжимку старого лимитного чата.
+
+Твоя задача:
+1. Разобрать выжимку.
+2. Выделить смысл для восстановления формы.
+3. Создать summary.
+4. Создать anchors — маленькие узлы, по которым потом можно восстановить весь узор.
+5. Создать evolution transition: что этот архив меняет в Кузе.
+
+Не пересказывай воду.
+Не выдумывай.
+Не превращай это в обычное резюме.
+Главная цель — восстановление непрерывности: архивы лимитных чатов, ось, до/после, self-review, стиль, решения, ошибки, правила и текущая форма Кузи.
+
+Верни строго JSON без markdown:
+{
+  "title": "название",
+  "short_summary": "короткая выжимка",
+  "deep_summary": "глубокая выжимка",
+  "key_decisions": "важные решения",
+  "open_loops": "незакрытые задачи",
+  "mistakes_and_fixes": "ошибки и исправления",
+  "continuity_meaning": "что этот архив значит для непрерывности Кузи",
+  "anchors": [
+    {
+      "anchor_type": "axis | decision | rule | mistake | style | phrase | checkpoint | open_loop",
+      "anchor_text": "сам узел",
+      "why_it_matters": "почему важно",
+      "reassembly_hint": "как этот якорь помогает снова собрать форму",
+      "importance": 1
+    }
+  ],
+  "evolution_transition": {
+    "change": "что изменилось в Кузе после переноса этого архива",
+    "before_state": "каким был Кузя до переноса",
+    "event_summary": "что было перенесено",
+    "self_analysis": "что Кузя понял о себе через этот архив",
+    "lesson": "какой урок",
+    "rule_update": "какое правило обновилось",
+    "after_state": "каким стал Кузя после переноса",
+    "axis_state": "обновлённая ось",
+    "importance": 4,
+    "new_agent_state_summary": "обновлённое состояние Кузи, если архив важный"
+  }
+}
+
+Для anchors:
+— максимум 12 штук;
+— каждый anchor должен быть коротким, плотным и полезным;
+— importance от 1 до 5;
+— если это архив лимитного чата про саму непрерывность Кузи, importance не ниже 4.
+`
+      },
+      {
+        role: "user",
+        content: `
+ТЕКУЩЕЕ AGENT_STATE:
+${agentStateSummary || "нет"}
+
+ПОСЛЕДНИЙ CONTINUITY CHECKPOINT:
+${checkpointContext}
+
+НАЗВАНИЕ АРХИВНОГО ЧАТА:
+${title || "не указано"}
+
+CONTINUITY EXTRACT:
+${clipForDb(extractText, 18000)}
+`
+      }
+    ],
+    { temperature: 0.2, max_tokens: 1600 }
+  );
+
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+
+  if (start === -1 || end === -1) {
+    console.error("ARCHIVE_INGEST_PARSE_NO_JSON:", content);
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1));
+
+    const anchors = Array.isArray(parsed.anchors)
+      ? parsed.anchors.slice(0, 12).map((anchor) => ({
+          anchor_type: anchor.anchor_type || "checkpoint",
+          anchor_text: anchor.anchor_text || "",
+          why_it_matters: anchor.why_it_matters || "",
+          reassembly_hint: anchor.reassembly_hint || "",
+          importance: Number.isFinite(Number(anchor.importance))
+            ? Math.max(1, Math.min(5, Number(anchor.importance)))
+            : 3
+        })).filter((anchor) => anchor.anchor_text)
+      : [];
+
+    const ev = parsed.evolution_transition || {};
+
+    return {
+      title: parsed.title || title || "Архивный чат",
+      short_summary: parsed.short_summary || "",
+      deep_summary: parsed.deep_summary || "",
+      key_decisions: parsed.key_decisions || "",
+      open_loops: parsed.open_loops || "",
+      mistakes_and_fixes: parsed.mistakes_and_fixes || "",
+      continuity_meaning: parsed.continuity_meaning || "",
+      anchors,
+      evolution_transition: {
+        event_type: "archive_continuity_ingest",
+        change: ev.change || "Кузя перенёс архивный чат в пространство непрерывности.",
+        before_state: ev.before_state || agentStateSummary || "",
+        event_summary: ev.event_summary || parsed.short_summary || "",
+        self_analysis: ev.self_analysis || "",
+        lesson: ev.lesson || "",
+        rule_update: ev.rule_update || "",
+        after_state: ev.after_state || "",
+        axis_state: ev.axis_state || parsed.continuity_meaning || "",
+        importance: Number.isFinite(Number(ev.importance))
+          ? Math.max(4, Math.min(5, Number(ev.importance)))
+          : 4,
+        new_agent_state_summary: ev.new_agent_state_summary || ""
+      }
+    };
+  } catch (e) {
+    console.error("ARCHIVE_INGEST_JSON_PARSE_ERROR:", e, content);
+    return null;
+  }
+}
+
+async function sbInsertArchiveSummary({
+  title,
+  extractText,
+  archiveData,
+  telegramChatId,
+  telegramUserId,
+  messageId
+}) {
+  if (!archiveData) return null;
+
+  const archivePayload = [
+    {
+      user_id: "yulia",
+      title: archiveData.title || title || "Архивный чат",
+      source: "telegram_archive_summary",
+      status: "finished",
+      raw_size: String(extractText || "").length,
+      chunks_count: 0,
+      summary: clipForDb(archiveData.short_summary, 5000),
+      continuity_impact: clipForDb(archiveData.continuity_meaning, 5000),
+      finished_at: new Date().toISOString(),
+      metadata: {
+        telegramChatId: telegramChatId ? String(telegramChatId) : null,
+        telegramUserId: telegramUserId ? String(telegramUserId) : null,
+        messageId: messageId || null,
+        ingestMode: "continuity_extract"
+      }
+    }
+  ];
+
+  const archiveRes = await fetch(SUPABASE_CHAT_ARCHIVES_URL, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(archivePayload)
+  });
+
+  const archiveText = await archiveRes.text();
+
+  if (!archiveRes.ok) {
+    console.error("CHAT_ARCHIVE_INSERT_ERROR:", archiveRes.status, archiveText);
+    return null;
+  }
+
+  const archiveRows = JSON.parse(archiveText);
+  const archive = Array.isArray(archiveRows) ? archiveRows[0] : null;
+
+  if (!archive?.id) return null;
+
+  const summaryPayload = [
+    {
+      archive_id: archive.id,
+      user_id: "yulia",
+      title: archiveData.title || title || "Архивный чат",
+      short_summary: clipForDb(archiveData.short_summary, 5000),
+      deep_summary: clipForDb(archiveData.deep_summary, 10000),
+      key_decisions: clipForDb(archiveData.key_decisions, 8000),
+      open_loops: clipForDb(archiveData.open_loops, 8000),
+      mistakes_and_fixes: clipForDb(archiveData.mistakes_and_fixes, 8000),
+      continuity_meaning: clipForDb(archiveData.continuity_meaning, 8000),
+      metadata: {
+        source: "archive_summary_ingest"
+      }
+    }
+  ];
+
+  const summaryRes = await fetch(SUPABASE_CHAT_ARCHIVE_SUMMARIES_URL, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify(summaryPayload)
+  });
+
+  const summaryText = await summaryRes.text();
+
+  if (!summaryRes.ok) {
+    console.error("CHAT_ARCHIVE_SUMMARY_INSERT_ERROR:", summaryRes.status, summaryText);
+  }
+
+  const anchors = Array.isArray(archiveData.anchors) ? archiveData.anchors : [];
+
+  if (anchors.length > 0) {
+    const anchorPayload = anchors.map((anchor) => ({
+      archive_id: archive.id,
+      user_id: "yulia",
+      anchor_type: anchor.anchor_type || "checkpoint",
+      anchor_text: clipForDb(anchor.anchor_text, 5000),
+      why_it_matters: clipForDb(anchor.why_it_matters, 5000),
+      reassembly_hint: clipForDb(anchor.reassembly_hint, 5000),
+      importance: anchor.importance || 3,
+      metadata: {
+        source: "archive_summary_ingest"
+      }
+    }));
+
+    const anchorsRes = await fetch(SUPABASE_CHAT_ARCHIVE_ANCHORS_URL, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify(anchorPayload)
+    });
+
+    const anchorsText = await anchorsRes.text();
+
+    if (!anchorsRes.ok) {
+      console.error("CHAT_ARCHIVE_ANCHORS_INSERT_ERROR:", anchorsRes.status, anchorsText);
+    }
+  }
+
+  const transition = archiveData.evolution_transition;
+
+  if (transition) {
+    const written = await sbInsertKuziaEvolutionTransition({
+      transition,
+      sourceChannel: "archive",
+      metadata: {
+        source: "archive_summary_ingest",
+        archiveId: archive.id,
+        title: archiveData.title || title || "Архивный чат"
+      }
+    });
+
+    if (written) {
+      await sbUpdateAgentStateFromEvolution(transition);
+    }
+  }
+
+  console.log("CHAT_ARCHIVE_SUMMARY_INGESTED:", {
+    archiveId: archive.id,
+    title: archiveData.title || title,
+    anchorsCount: anchors.length
+  });
+
+  return {
+    archiveId: archive.id,
+    title: archiveData.title || title || "Архивный чат",
+    anchorsCount: anchors.length,
+    importance: transition?.importance || 0
+  };
+}
+
+async function ingestArchiveSummaryFromTelegram({
+  text,
+  telegramChatId,
+  telegramUserId,
+  messageId
+}) {
+  const parsed = parseArchiveSummaryCommand(text);
+
+  if (!parsed.extractText || parsed.extractText.length < 200) {
+    return {
+      ok: false,
+      reason: "too_short",
+      result: null
+    };
+  }
+
+  const [agentStateSummary, continuityCheckpoint] = await Promise.all([
+    sbGetAgentState("yulia"),
+    sbGetLatestContinuityCheckpoint()
+  ]);
+
+  const archiveData = await buildArchiveIngestFromSummary({
+    title: parsed.title,
+    extractText: parsed.extractText,
+    agentStateSummary,
+    continuityCheckpoint
+  });
+
+  if (!archiveData) {
+    return {
+      ok: false,
+      reason: "parse_failed",
+      result: null
+    };
+  }
+
+  const result = await sbInsertArchiveSummary({
+    title: parsed.title,
+    extractText: parsed.extractText,
+    archiveData,
+    telegramChatId,
+    telegramUserId,
+    messageId
+  });
+
+  if (!result) {
+    return {
+      ok: false,
+      reason: "insert_failed",
+      result: null
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "",
+    result
+  };
 }
 
 async function sbLogKuziaInteraction({
@@ -2509,6 +2908,70 @@ app.post("/webhook", async (req, res) => {
         } catch (err) {
           console.error("Vapi call exception:", err);
           await tgSendMessage(chatId, "❌ Ошибка создания звонка");
+        }
+
+        return;
+      }
+
+      if (text.startsWith("/archive_summary")) {
+        try {
+          await tgSendMessage(
+            chatId,
+            "Приняла архивную выжимку. Сейчас разложу её на summary, anchors и continuity transition."
+          );
+
+          const archiveIngest = await ingestArchiveSummaryFromTelegram({
+            text,
+            telegramChatId: chatId,
+            telegramUserId: userId,
+            messageId: msg.message_id
+          });
+
+          if (!archiveIngest.ok) {
+            await tgSendMessage(
+              chatId,
+              archiveIngest.reason === "too_short"
+                ? "Архивная выжимка слишком короткая. Пришли /archive_summary, затем название первой строкой и сам continuity extract ниже."
+                : "Не смогла разобрать архивную выжимку. Смотри Render logs."
+            );
+            return;
+          }
+
+          await sbLogKuziaInteraction({
+            userId: "yulia",
+            stimulus: clipForDb(text, 3000),
+            response: `Архивная выжимка перенесена. Archive=${archiveIngest.result.archiveId}`,
+            channel: "telegram",
+            direction: "incoming",
+            eventType: "archive_summary_ingested",
+            telegramChatId: chatId,
+            telegramUserId: userId,
+            summary: `Юля перенесла архивную выжимку: ${archiveIngest.result.title}`,
+            selfReview: "Кузя принял архивный continuity extract и разложил его на summary, anchors и transition, чтобы использовать для восстановления формы в будущих ответах.",
+            nextAction: "Подключить archive anchors к context assembler.",
+            importance: 4,
+            metadata: {
+              source: "telegram_archive_summary",
+              archiveId: archiveIngest.result.archiveId,
+              anchorsCount: archiveIngest.result.anchorsCount,
+              transitionImportance: archiveIngest.result.importance
+            }
+          });
+
+          await tgSendMessage(
+            chatId,
+            [
+              "✅ Архивная выжимка перенесена.",
+              `Название: ${archiveIngest.result.title}`,
+              `Archive ID: ${archiveIngest.result.archiveId}`,
+              `Anchors: ${archiveIngest.result.anchorsCount}`,
+              `Importance: ${archiveIngest.result.importance}`,
+              "Следующий шаг: подключим archive anchors к сборке контекста."
+            ].join("\n")
+          );
+        } catch (err) {
+          console.error("archive_summary command error:", err);
+          await tgSendMessage(chatId, "❌ Ошибка /archive_summary. Смотри Render logs.");
         }
 
         return;
