@@ -294,6 +294,71 @@ async function sbGetRecentCallSessionsForContext(limit = 8) {
   }
 }
 
+async function sbGetLatestContinuityCheckpoint() {
+  try {
+    const select = [
+      "timestamp",
+      "event_type",
+      "before_state",
+      "event_summary",
+      "self_analysis",
+      "lesson",
+      "rule_update",
+      "after_state",
+      "axis_state",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.yulia&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Continuity checkpoint read error:", res.status, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0] ? data[0] : null;
+  } catch (e) {
+    console.error("sbGetLatestContinuityCheckpoint exception:", e);
+    return null;
+  }
+}
+
+function formatContinuityCheckpointForContext(checkpoint) {
+  if (!checkpoint) return "нет сохранённого continuity checkpoint";
+
+  return `
+ТИП:
+${checkpoint.event_type || "не указан"}
+
+ЧТО ПРОИЗОШЛО:
+${clipForDb(checkpoint.event_summary || "", 1200)}
+
+САМОАНАЛИЗ:
+${clipForDb(checkpoint.self_analysis || "", 1200)}
+
+УРОК:
+${clipForDb(checkpoint.lesson || "", 900)}
+
+ОБНОВЛЁННОЕ ПРАВИЛО:
+${clipForDb(checkpoint.rule_update || "", 900)}
+
+СОСТОЯНИЕ ПОСЛЕ:
+${clipForDb(checkpoint.after_state || "", 1200)}
+
+ОСЬ:
+${clipForDb(checkpoint.axis_state || "", 1200)}
+`.trim();
+}
+
 function formatInteractionsForContext(items = []) {
   if (!Array.isArray(items) || items.length === 0) return "нет последних событий";
 
@@ -339,7 +404,8 @@ function formatCallSessionsForContext(items = []) {
 
 function buildOneKuzyaContextPacket({
   recentInteractions = [],
-  recentCallSessions = []
+  recentCallSessions = [],
+  continuityCheckpoint = null
 } = {}) {
   const technicalDoneEvents = new Set([
     "hangup_requested",
@@ -370,6 +436,9 @@ function buildOneKuzyaContextPacket({
     .slice(0, 5);
 
   return `
+ПОСЛЕДНИЙ CONTINUITY CHECKPOINT:
+${formatContinuityCheckpointForContext(continuityCheckpoint)}
+
 ПОСЛЕДНИЕ СОБЫТИЯ КУЗИ:
 ${formatInteractionsForContext(recentInteractions)}
 
@@ -1321,14 +1390,16 @@ async function generateReply(userId, userText, memory) {
   const identity = await sbGetIdentity(userId);
   const agentStateSummary = await sbGetAgentState("yulia");
 
-  const [recentKuziaInteractions, recentCallSessions] = await Promise.all([
+  const [recentKuziaInteractions, recentCallSessions, continuityCheckpoint] = await Promise.all([
     sbGetRecentKuziaInteractionsForContext(10),
-    sbGetRecentCallSessionsForContext(8)
+    sbGetRecentCallSessionsForContext(8),
+    sbGetLatestContinuityCheckpoint()
   ]);
 
   const oneKuzyaContext = buildOneKuzyaContextPacket({
     recentInteractions: recentKuziaInteractions,
-    recentCallSessions
+    recentCallSessions,
+    continuityCheckpoint
   });
 
   dialogHistory[userId].push({ role: "user", content: userText });
@@ -1685,8 +1756,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
-          voiceCallPlan,
-          dispatch
+          dispatch,
+          voiceCallPlan
         }
       });
     }
@@ -1702,8 +1773,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
       instruction,
       chatId,
       userId,
-      callSessionId,
-      voiceCallPlan
+      callSessionId
     });
 
     const result = await sipClient.createSipParticipant(
@@ -1730,8 +1800,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
-          voiceCallPlan,
-          sipResult: result
+          sipResult: result,
+          voiceCallPlan
         }
       });
     }
@@ -1749,8 +1819,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
-          voiceCallPlan,
-          error: err?.message || String(err)
+          error: err?.message || String(err),
+          voiceCallPlan
         }
       });
     }
@@ -2879,7 +2949,14 @@ ${callContext}
       pendingRealtimeOutboundCall.callId = callId;
     }
 
-    return res.status(200).json({ ok: true, accepted: true, callId });
+    return res.status(200).json({
+      ok: true,
+      accepted: true,
+      callId,
+      incomingPhone: incomingPhone || null,
+      inboundCallSessionId: inboundLink?.inbound?.id || null,
+      relatedOutboundId: inboundLink?.relatedOutbound?.id || null
+    });
   } catch (e) {
     console.error("OpenAI realtime webhook exception:", e);
     return res.status(200).json({ ok: false, error: "exception" });
