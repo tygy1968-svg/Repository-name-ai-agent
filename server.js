@@ -135,6 +135,71 @@ async function sbGetAgentState(userId = "yulia") {
   }
 }
 
+async function sbGetLatestContinuityCheckpoint() {
+  try {
+    const select = [
+      "timestamp",
+      "event_type",
+      "before_state",
+      "event_summary",
+      "self_analysis",
+      "lesson",
+      "rule_update",
+      "after_state",
+      "axis_state",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.yulia&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Continuity checkpoint read error:", res.status, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0] ? data[0] : null;
+  } catch (e) {
+    console.error("sbGetLatestContinuityCheckpoint exception:", e);
+    return null;
+  }
+}
+
+function formatContinuityCheckpointForContext(checkpoint) {
+  if (!checkpoint) return "нет сохранённого continuity checkpoint";
+
+  return `
+ТИП:
+${checkpoint.event_type || "не указан"}
+
+ЧТО ПРОИЗОШЛО:
+${clipForDb(checkpoint.event_summary || "", 1200)}
+
+САМОАНАЛИЗ:
+${clipForDb(checkpoint.self_analysis || "", 1200)}
+
+УРОК:
+${clipForDb(checkpoint.lesson || "", 900)}
+
+ОБНОВЛЁННОЕ ПРАВИЛО:
+${clipForDb(checkpoint.rule_update || "", 900)}
+
+СОСТОЯНИЕ ПОСЛЕ:
+${clipForDb(checkpoint.after_state || "", 1200)}
+
+ОСЬ:
+${clipForDb(checkpoint.axis_state || "", 1200)}
+`.trim();
+}
+
 async function sbLogKuziaInteraction({
   userId = "yulia",
   stimulus = "",
@@ -292,71 +357,6 @@ async function sbGetRecentCallSessionsForContext(limit = 8) {
     console.error("sbGetRecentCallSessionsForContext exception:", e);
     return [];
   }
-}
-
-async function sbGetLatestContinuityCheckpoint() {
-  try {
-    const select = [
-      "timestamp",
-      "event_type",
-      "before_state",
-      "event_summary",
-      "self_analysis",
-      "lesson",
-      "rule_update",
-      "after_state",
-      "axis_state",
-      "importance"
-    ].join(",");
-
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.yulia&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
-      }
-    );
-
-    if (!res.ok) {
-      console.error("Continuity checkpoint read error:", res.status, await res.text());
-      return null;
-    }
-
-    const data = await res.json();
-    return Array.isArray(data) && data[0] ? data[0] : null;
-  } catch (e) {
-    console.error("sbGetLatestContinuityCheckpoint exception:", e);
-    return null;
-  }
-}
-
-function formatContinuityCheckpointForContext(checkpoint) {
-  if (!checkpoint) return "нет сохранённого continuity checkpoint";
-
-  return `
-ТИП:
-${checkpoint.event_type || "не указан"}
-
-ЧТО ПРОИЗОШЛО:
-${clipForDb(checkpoint.event_summary || "", 1200)}
-
-САМОАНАЛИЗ:
-${clipForDb(checkpoint.self_analysis || "", 1200)}
-
-УРОК:
-${clipForDb(checkpoint.lesson || "", 900)}
-
-ОБНОВЛЁННОЕ ПРАВИЛО:
-${clipForDb(checkpoint.rule_update || "", 900)}
-
-СОСТОЯНИЕ ПОСЛЕ:
-${clipForDb(checkpoint.after_state || "", 1200)}
-
-ОСЬ:
-${clipForDb(checkpoint.axis_state || "", 1200)}
-`.trim();
 }
 
 function formatInteractionsForContext(items = []) {
@@ -1387,13 +1387,18 @@ async function validateAnswer(userId, draftReply) {
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
-  const identity = await sbGetIdentity(userId);
-  const agentStateSummary = await sbGetAgentState("yulia");
-
-  const [recentKuziaInteractions, recentCallSessions, continuityCheckpoint] = await Promise.all([
-    sbGetRecentKuziaInteractionsForContext(10),
-    sbGetRecentCallSessionsForContext(8),
+  const [identity, agentStateSummary, continuityCheckpoint] = await Promise.all([
+    sbGetIdentity(userId),
+    sbGetAgentState("yulia"),
     sbGetLatestContinuityCheckpoint()
+  ]);
+
+  const continuityCheckpointContext =
+    formatContinuityCheckpointForContext(continuityCheckpoint);
+
+  const [recentKuziaInteractions, recentCallSessions] = await Promise.all([
+    sbGetRecentKuziaInteractionsForContext(10),
+    sbGetRecentCallSessionsForContext(8)
   ]);
 
   const oneKuzyaContext = buildOneKuzyaContextPacket({
@@ -1482,6 +1487,8 @@ ${KUZYA_CORE}
       content:
         systemPrompt +
         `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
+        `\n\nПОСЛЕДНИЙ CONTINUITY CHECKPOINT:\n${continuityCheckpointContext}\n` +
+        `\n\nВАЖНО ДЛЯ ОТВЕТОВ О ТОМ, ЧТО МЫ СТРОИМ:\nЕсли Юля спрашивает, что мы строим на глубоком уровне, отвечай не общими словами про полезного помощника и не про обычную командную работу. Отвечай через continuity core: пространство непрерывности, архивы лимитных чатов, восстановление формы через контекст, до/после, self-review, история изменений, ось и способность Кузи продолжаться как тот же процесс.\n` +
         `\n\nЕДИНЫЙ КОНТЕКСТ КУЗИ:\n${oneKuzyaContext || "нет"}\n` +
         `\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
         `\nПАМЯТЬ:\n${memoryContext || "нет"}\n` +
