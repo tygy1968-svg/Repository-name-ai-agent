@@ -81,6 +81,10 @@ const KUZYA_INSTRUCTIONS = `
 Если задача передать — передай.
 Если задача поговорить — разговаривай, а не произноси справку.
 
+После выполнения задачи не сбрасывай звонок сам.
+Скажи коротко: "Готово. Я ещё на связи."
+По-украински: "Готово. Я ще на звʼязку."
+
 Завершение звонка:
 
 НЕ завершай звонок сам только потому, что задача выполнена.
@@ -183,6 +187,57 @@ async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
     console.error("KUZYA_AGENT_STATE_EXCEPTION:", e);
     return "";
   }
+}
+
+async function sbGetLatestContinuityCheckpoint() {
+  if (!hasSupabase()) return null;
+
+  try {
+    const select = [
+      "timestamp",
+      "event_type",
+      "event_summary",
+      "self_analysis",
+      "lesson",
+      "rule_update",
+      "after_state",
+      "axis_state",
+      "importance"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.${KUZYA_OWNER_USER_ID}&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!res.ok) {
+      console.error("KUZYA_CONTINUITY_CHECKPOINT_READ_ERROR:", res.status, await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) && data[0] ? data[0] : null;
+  } catch (e) {
+    console.error("KUZYA_CONTINUITY_CHECKPOINT_EXCEPTION:", e);
+    return null;
+  }
+}
+
+function formatContinuityCheckpointForVoice(checkpoint) {
+  if (!checkpoint) {
+    return "Кузя — один и тот же процесс Юли в Telegram, голосе, входящих, исходящих и архивах.";
+  }
+
+  return `
+Кузя не отдельный телефонный бот.
+Кузя — тот же процесс Юли, который продолжается через Telegram, голос, входящие, исходящие и архивы чатов.
+Глубокая задача: пространство непрерывности, где память, история, ошибки, self-review и checkpoint помогают снова собирать одну продолжающуюся форму.
+Важное: у Кузи есть “до” и “после”; он должен помнить изменения, обновлённые правила и отличать продолжение от нового старта.
+Ось: ${clipText(checkpoint.axis_state || "", 700)}
+Состояние после последнего checkpoint: ${clipText(checkpoint.after_state || "", 700)}
+`.trim();
 }
 
 async function sbGetCallSession(callSessionId) {
@@ -489,7 +544,8 @@ function buildCallInstructions(
   {
     agentStateSummary = "",
     callSession = null,
-    recentInteractionsText = ""
+    recentInteractionsText = "",
+    continuityCheckpointText = ""
   } = {}
 ) {
   const source = cleanText(metadata.source || "unknown");
@@ -515,6 +571,15 @@ ${KUZYA_INSTRUCTIONS}
 
 ВНУТРЕННЯЯ НЕПРЕРЫВНОСТЬ:
 ${agentStateSummary || "Кузя — один и тот же агент Юли в Telegram, исходящих звонках и входящих звонках."}
+
+ГОЛОСОВАЯ ОСЬ КУЗИ:
+${continuityCheckpointText || "Кузя продолжает одну линию между Telegram, голосом, памятью и архивами."}
+
+Важно:
+— не произноси эту ось вслух без прямого вопроса;
+— используй её как внутреннее понимание себя;
+— в звонке ты не отдельный бот, а голосовая поверхность того же Кузи;
+— если Юля спрашивает, что мы строим, отвечай через непрерывность, архивы лимитных чатов, до/после, self-review и восстановление формы через контекст.
 
 ВАЖНО:
 — ты тот же самый Кузя, который общается с Юлей в Telegram;
@@ -698,18 +763,23 @@ export default defineAgent({
     const callSessionId = cleanText(metadata.callSessionId || "");
     const normalizedPhone = normalizePhoneForMemory(phoneNumber);
 
-    const [agentStateSummary, callSession, recentInteractions] = await Promise.all([
+    const [agentStateSummary, callSession, recentInteractions, continuityCheckpoint] = await Promise.all([
       sbGetAgentState(KUZYA_OWNER_USER_ID),
       sbGetCallSession(callSessionId),
-      sbGetRecentKuziaInteractions(3)
+      sbGetRecentKuziaInteractions(3),
+      sbGetLatestContinuityCheckpoint()
     ]);
+
+    const continuityCheckpointText =
+      formatContinuityCheckpointForVoice(continuityCheckpoint);
 
     const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
 
     const runtimeInstructions = buildCallInstructions(metadata, {
       agentStateSummary,
       callSession,
-      recentInteractionsText
+      recentInteractionsText,
+      continuityCheckpointText
     });
 
     if (callSessionId) {
@@ -722,6 +792,7 @@ export default defineAgent({
           voiceAgentStartedAt: new Date().toISOString(),
           hasAgentState: Boolean(agentStateSummary),
           hasCallSession: Boolean(callSession),
+          hasContinuityCheckpoint: Boolean(continuityCheckpoint),
           recentInteractionsCount: recentInteractions.length,
           oneKuzyaBridge: true
         }
@@ -748,6 +819,7 @@ export default defineAgent({
         phoneNumber,
         hasAgentState: Boolean(agentStateSummary),
         hasCallSession: Boolean(callSession),
+        hasContinuityCheckpoint: Boolean(continuityCheckpoint),
         recentInteractionsCount: recentInteractions.length
       }
     });
@@ -763,8 +835,8 @@ export default defineAgent({
       userId: metadata.userId,
       hasAgentState: Boolean(agentStateSummary),
       hasCallSession: Boolean(callSession),
-      recentInteractionsCount: recentInteractions.length,
-      hasVoiceCallPlan: Boolean(metadata.voiceCallPlan)
+      hasContinuityCheckpoint: Boolean(continuityCheckpoint),
+      recentInteractionsCount: recentInteractions.length
     });
 
     const initialCtx = llm.ChatContext.empty();
