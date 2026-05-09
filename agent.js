@@ -1014,8 +1014,11 @@ export default defineAgent({
       }
     });
 
-    await session.generateReply({
-      instructions: `
+    let initialReplyOk = false;
+
+    try {
+      await session.generateReply({
+        instructions: `
 Человек поднял трубку.
 
 Начни разговор сразу, но естественно.
@@ -1023,15 +1026,11 @@ export default defineAgent({
 НЕ говори шаблонно.
 НЕ спрашивай "чем могу помочь".
 
-Если звонишь Юле, начни естественно, без официальности:
+Если звонишь Юле, начни коротко:
 "Юль, я на связи."
 
-Если звонишь другому человеку, начни просто:
+Если звонишь другому человеку, начни коротко:
 "Привет, это Кузя. Я от Юли."
-или, если уместнее:
-"Добрий день, це Кузя, я від Юлі."
-
-Не говори слишком официально: "осуществляю звонок", "цель данного звонка", "проверяю корректность сценария".
 
 Если Юля попросила говорить по-украински, сразу говори по-украински.
 Если собеседник говорит по-украински, дальше говори по-украински.
@@ -1043,11 +1042,6 @@ export default defineAgent({
 Не говори технические слова.
 Не говори про базу, session, Supabase, call_sessions, LiveKit, Zadarma, room или логи.
 
-Если задача творческая — выполняй творчески.
-Если задача спросить — задай вопрос.
-Если задача передать — передай.
-Если задача поговорить — говори с человеком, а не произноси справку.
-
 После выполнения задачи НЕ завершай звонок сам.
 Скажи коротко, что ты ещё на связи.
 Завершай только после явного прощания: "пока", "до свидания", "бувай", "до побачення".
@@ -1056,7 +1050,52 @@ export default defineAgent({
 Задача:
 ${instruction}
 `
-    });
+      });
+
+      initialReplyOk = true;
+    } catch (e) {
+      console.error("KUZYA_INITIAL_REPLY_FAILED:", e);
+
+      if (callSessionId) {
+        await sbUpdateCallSession(callSessionId, {
+          status: "initial_reply_failed",
+          summary: "Кузя дождался стадии первой реплики, но голосовая сессия уже закрывалась.",
+          self_review: "Вероятно, Realtime-сессия или телефонная комната закрылась раньше, чем Кузя успел отправить первую реплику.",
+          metadata: {
+            ...(callSession?.metadata || {}),
+            initialReplyFailedAt: new Date().toISOString(),
+            initialReplyError: e?.message || String(e),
+            oneKuzyaBridge: true
+          }
+        });
+      }
+
+      await sbLogKuziaInteraction({
+        stimulus: instruction,
+        response: "Первая голосовая реплика не была отправлена: AgentSession уже закрывалась.",
+        channel: "outbound_call",
+        direction: "internal",
+        eventType: "initial_voice_reply_failed",
+        callSessionId: callSessionId || null,
+        telegramChatId: metadata.chatId || null,
+        telegramUserId: metadata.userId || null,
+        normalizedPhone,
+        summary: "Кузя не смог отправить первую голосовую реплику, потому что голосовая сессия закрывалась.",
+        selfReview: "Нужно использовать более быструю realtime-модель или предварительный план, чтобы не задерживать старт звонка.",
+        nextAction: "Вернуть OPENAI_REALTIME_MODEL на gpt-realtime и тестировать снова.",
+        importance: 4,
+        metadata: {
+          source: metadata.source || "unknown",
+          roomName: ctx.room?.name || null,
+          phoneNumber,
+          error: e?.message || String(e)
+        }
+      });
+
+      return;
+    }
+
+    if (!initialReplyOk) return;
 
     if (callSessionId) {
       await sbUpdateCallSession(callSessionId, {
