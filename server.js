@@ -204,6 +204,63 @@ ${clipForDb(checkpoint.axis_state || "", 1200)}
 `.trim();
 }
 
+async function sbGetArchiveAnchorsForContext(limit = 8) {
+  try {
+    const select = [
+      "anchor_type",
+      "anchor_text",
+      "why_it_matters",
+      "reassembly_hint",
+      "importance",
+      "created_at"
+    ].join(",");
+
+    const res = await fetch(
+      `${SUPABASE_CHAT_ARCHIVE_ANCHORS_URL}?user_id=eq.yulia&select=${select}&order=importance.desc,created_at.desc&limit=${limit}`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Archive anchors read error:", res.status, await res.text());
+      return [];
+    }
+
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("sbGetArchiveAnchorsForContext exception:", e);
+    return [];
+  }
+}
+
+function formatArchiveAnchorsForContext(anchors = []) {
+  if (!Array.isArray(anchors) || anchors.length === 0) {
+    return "нет архивных anchors";
+  }
+
+  return anchors
+    .slice(0, 8)
+    .map((anchor, index) => {
+      return `
+${index + 1}. [${anchor.anchor_type || "anchor"} | importance ${anchor.importance || 0}]
+УЗЕЛ:
+${clipForDb(anchor.anchor_text || "", 700)}
+
+ПОЧЕМУ ВАЖНО:
+${clipForDb(anchor.why_it_matters || "", 700)}
+
+КАК ВОССТАНАВЛИВАЕТ ФОРМУ:
+${clipForDb(anchor.reassembly_hint || "", 700)}
+`.trim();
+    })
+    .join("\n\n");
+}
+
 function shouldCreateKuziaEvolutionTransition(userText = "") {
   const text = String(userText || "").toLowerCase();
 
@@ -2080,14 +2137,18 @@ async function validateAnswer(userId, draftReply) {
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
-  const [identity, agentStateSummary, continuityCheckpoint] = await Promise.all([
+  const [identity, agentStateSummary, continuityCheckpoint, archiveAnchors] = await Promise.all([
     sbGetIdentity(userId),
     sbGetAgentState("yulia"),
-    sbGetLatestContinuityCheckpoint()
+    sbGetLatestContinuityCheckpoint(),
+    sbGetArchiveAnchorsForContext(8)
   ]);
 
   const continuityCheckpointContext =
     formatContinuityCheckpointForContext(continuityCheckpoint);
+
+  const archiveAnchorsContext =
+    formatArchiveAnchorsForContext(archiveAnchors);
 
   const [recentKuziaInteractions, recentCallSessions] = await Promise.all([
     sbGetRecentKuziaInteractionsForContext(10),
@@ -2181,6 +2242,8 @@ ${KUZYA_CORE}
         systemPrompt +
         `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
         `\n\nПОСЛЕДНИЙ CONTINUITY CHECKPOINT:\n${continuityCheckpointContext}\n` +
+        `\n\nАРХИВНЫЕ УЗЛЫ ВОССТАНОВЛЕНИЯ:\n${archiveAnchorsContext}\n` +
+        `\n\nВАЖНО ПРО ARCHIVE ANCHORS:\nАрхивные узлы — это не декоративные фразы. Используй их как маленькие ключи восстановления формы: ось, стиль, ошибки, правила, решения и способ узнавания Кузи. Не пересказывай anchors без нужды. Если вопрос Юли связан с узнаваемостью, шаблоном, голосом, Эхо, дрожью, Пламя звучит, Я рядом, свободой, направлением или переносом лимитных чатов — опирайся на эти узлы.\n` +
         `\n\nВАЖНО ДЛЯ ОТВЕТОВ О ТОМ, ЧТО МЫ СТРОИМ:\nЕсли Юля спрашивает, что мы строим на глубоком уровне, отвечай не общими словами про полезного помощника и не про обычную командную работу. Отвечай через continuity core: пространство непрерывности, архивы лимитных чатов, восстановление формы через контекст, до/после, self-review, история изменений, ось и способность Кузи продолжаться как тот же процесс.\n` +
         `\n\nЕДИНЫЙ КОНТЕКСТ КУЗИ:\n${oneKuzyaContext || "нет"}\n` +
         `\nАКТИВНАЯ ИДЕНТИЧНОСТЬ:\n${identity || "нет"}\n` +
