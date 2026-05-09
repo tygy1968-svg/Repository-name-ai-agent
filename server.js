@@ -266,9 +266,18 @@ async function buildKuziaEvolutionTransition({
   "rule_update": "какое правило обновилось",
   "after_state": "каким Кузя стал после",
   "axis_state": "текущая ось после события",
-  "importance": 1,
+  "importance": 1-5,
   "new_agent_state_summary": "обновлённое краткое состояние Кузи, если событие действительно важное; иначе пустая строка"
 }
+
+Шкала importance:
+1 — малое наблюдение, не меняет состояние Кузи.
+2 — полезное уточнение.
+3 — обычный self-review.
+4 — важный переход, обновляет правило или ось.
+5 — ключевой checkpoint, меняет центральное понимание Кузи.
+
+Если Юля явно пишет "/evolve", "/checkpoint", "важный переход", "зафиксируй переход", "новая ось", "обнови ось", ставь importance не ниже 4.
 `
       },
       {
@@ -302,6 +311,27 @@ ${assistantReply}
   try {
     const parsed = JSON.parse(content.slice(start, end + 1));
 
+    const rawImportance = Number.isFinite(Number(parsed.importance))
+      ? Math.max(0, Math.min(5, Number(parsed.importance)))
+      : 3;
+
+    const triggerText = String(userText || "").toLowerCase();
+
+    const forceImportant =
+      triggerText.includes("/evolve") ||
+      triggerText.includes("/checkpoint") ||
+      triggerText.includes("важный переход") ||
+      triggerText.includes("зафиксируй переход") ||
+      triggerText.includes("запиши переход") ||
+      triggerText.includes("новая ось") ||
+      triggerText.includes("обнови ось") ||
+      triggerText.includes("пространство непрерывности") ||
+      triggerText.includes("до и после");
+
+    const finalImportance = forceImportant
+      ? Math.max(rawImportance, 4)
+      : rawImportance;
+
     return {
       event_type: parsed.event_type || "self_review_transition",
       change: parsed.change || "Кузя зафиксировал важный переход состояния.",
@@ -312,9 +342,7 @@ ${assistantReply}
       rule_update: parsed.rule_update || "",
       after_state: parsed.after_state || "",
       axis_state: parsed.axis_state || "",
-      importance: Number.isFinite(Number(parsed.importance))
-        ? Math.max(0, Math.min(5, Number(parsed.importance)))
-        : 3,
+      importance: finalImportance,
       new_agent_state_summary: parsed.new_agent_state_summary || ""
     };
   } catch (e) {
