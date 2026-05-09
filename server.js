@@ -793,6 +793,128 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   return data.choices?.[0]?.message?.content ?? "";
 }
 
+async function buildVoiceCallPlan({ phoneNumber, instruction }) {
+  const cleanInstruction = String(instruction || "").trim();
+  const lowerInstruction = cleanInstruction.toLowerCase();
+
+  const looksLikeYulia =
+    lowerInstruction.includes("юль") ||
+    lowerInstruction.includes("юля") ||
+    lowerInstruction.includes("юле") ||
+    lowerInstruction.includes("юлю");
+
+  const fallbackRecipient = looksLikeYulia ? "yulia" : "unknown";
+
+  const fallbackOpening = looksLikeYulia
+    ? "Юль, я на связи."
+    : "Привет, это Кузя. Я от Юли.";
+
+  const fallbackPlan = {
+    call_type: "simple_message",
+    recipient: fallbackRecipient,
+    language: lowerInstruction.includes("укр") || lowerInstruction.includes("украин") || lowerInstruction.includes("україн")
+      ? "ukrainian"
+      : "auto",
+    opening: fallbackOpening,
+    goal: cleanInstruction || "Коротко сказать, что Кузя на связи.",
+    steps: [
+      "Коротко представиться.",
+      "Сразу выполнить задачу Юли своими словами.",
+      "После выполнения не сбрасывать звонок без явного прощания."
+    ],
+    success_result: "Собеседник понял сообщение или ответил, что передать Юле.",
+    avoid: [
+      "не говорить как оператор",
+      "не спрашивать 'чем могу помочь'",
+      "не читать инструкцию дословно",
+      "не упоминать технические системы"
+    ],
+    after_task: "Сказать коротко, что Кузя ещё на связи.",
+    hangup_rule: "Завершать только после явного прощания."
+  };
+
+  if (!cleanInstruction) return fallbackPlan;
+
+  try {
+    const content = await openaiChat(
+      [
+        {
+          role: "system",
+          content: `
+Ты планировщик телефонного звонка для голосового агента Кузи.
+
+Твоя задача — превратить команду Юли в короткий практичный план звонка.
+
+Не пиши длинно.
+Не добавляй лишнего.
+Не придумывай факты.
+Не делай официальный стиль.
+План будет использован внутри агента и НЕ будет произноситься дословно.
+
+Если команда обращена к Юле самой: "Юль", "Юля", "Юле" — recipient = "yulia", opening = "Юль, я на связи."
+Если звонок другому человеку — recipient = "other_person", opening = "Привет, это Кузя. Я от Юли."
+Если непонятно, не называй собеседника Юлей.
+
+Верни строго JSON без markdown:
+{
+  "call_type": "simple_message | question | conversation | creative | reminder | unknown",
+  "recipient": "yulia | other_person | unknown",
+  "language": "russian | ukrainian | auto",
+  "opening": "короткая первая фраза",
+  "goal": "цель звонка одним предложением",
+  "steps": ["1 короткий шаг", "2 короткий шаг", "3 короткий шаг"],
+  "success_result": "что считается нормальным результатом",
+  "avoid": ["чего не говорить", "чего не делать"],
+  "after_task": "что сказать после выполнения задачи, если человек не прощается",
+  "hangup_rule": "когда завершать звонок"
+}
+`
+        },
+        {
+          role: "user",
+          content: `
+Номер: ${phoneNumber || "не указан"}
+
+Команда Юли:
+${cleanInstruction}
+`
+        }
+      ],
+      { temperature: 0.2, max_tokens: 420 }
+    );
+
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+
+    if (start === -1 || end === -1) {
+      console.error("VOICE_CALL_PLAN_PARSE_NO_JSON:", content);
+      return fallbackPlan;
+    }
+
+    const parsed = JSON.parse(content.slice(start, end + 1));
+
+    return {
+      call_type: parsed.call_type || fallbackPlan.call_type,
+      recipient: parsed.recipient || fallbackPlan.recipient,
+      language: parsed.language || fallbackPlan.language,
+      opening: parsed.opening || fallbackPlan.opening,
+      goal: parsed.goal || fallbackPlan.goal,
+      steps: Array.isArray(parsed.steps) && parsed.steps.length > 0
+        ? parsed.steps.slice(0, 4)
+        : fallbackPlan.steps,
+      success_result: parsed.success_result || fallbackPlan.success_result,
+      avoid: Array.isArray(parsed.avoid) && parsed.avoid.length > 0
+        ? parsed.avoid.slice(0, 5)
+        : fallbackPlan.avoid,
+      after_task: parsed.after_task || fallbackPlan.after_task,
+      hangup_rule: parsed.hangup_rule || fallbackPlan.hangup_rule
+    };
+  } catch (e) {
+    console.error("VOICE_CALL_PLAN_FAILED:", e);
+    return fallbackPlan;
+  }
+}
+
 // ---------- VAPI CUSTOM LLM BRAIN ----------
 function normalizeVapiContent(content) {
   if (typeof content === "string") return content;
@@ -1490,6 +1612,13 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
   const roomName = `kuzya-livekit-${Date.now()}`;
   const participantIdentity = `phone-${to.replace(/[^\d]/g, "")}`;
 
+  const voiceCallPlan = await buildVoiceCallPlan({
+    phoneNumber: to,
+    instruction
+  });
+
+  console.log("VOICE_CALL_PLAN:", voiceCallPlan);
+
   const callSession = await sbCreateCallSession({
     direction: "outbound",
     phoneNumber: to,
@@ -1500,7 +1629,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
     source: "telegram-lkcall",
     metadata: {
       transport: "livekit",
-      trunkId: sipTrunkId
+      trunkId: sipTrunkId,
+      voiceCallPlan
     }
   });
 
@@ -1530,6 +1660,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
     instruction:
       instruction ||
       "Скажи: Юля, я на связи. Это исходящий звонок Кузи через LiveKit.",
+    voiceCallPlan,
     chatId,
     userId
   });
@@ -1554,6 +1685,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
+          voiceCallPlan,
           dispatch
         }
       });
@@ -1570,7 +1702,8 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
       instruction,
       chatId,
       userId,
-      callSessionId
+      callSessionId,
+      voiceCallPlan
     });
 
     const result = await sipClient.createSipParticipant(
@@ -1597,6 +1730,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
+          voiceCallPlan,
           sipResult: result
         }
       });
@@ -1615,6 +1749,7 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
         metadata: {
           transport: "livekit",
           trunkId: sipTrunkId,
+          voiceCallPlan,
           error: err?.message || String(err)
         }
       });
@@ -2744,14 +2879,7 @@ ${callContext}
       pendingRealtimeOutboundCall.callId = callId;
     }
 
-    return res.status(200).json({
-      ok: true,
-      accepted: true,
-      callId,
-      incomingPhone: incomingPhone || null,
-      inboundCallSessionId: inboundLink?.inbound?.id || null,
-      relatedOutboundId: inboundLink?.relatedOutbound?.id || null
-    });
+    return res.status(200).json({ ok: true, accepted: true, callId });
   } catch (e) {
     console.error("OpenAI realtime webhook exception:", e);
     return res.status(200).json({ ok: false, error: "exception" });
