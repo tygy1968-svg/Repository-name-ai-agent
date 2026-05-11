@@ -117,6 +117,32 @@ function clipForDb(value, limit = 5000) {
   return text.length > limit ? text.slice(0, limit) : text;
 }
 
+function maskPhoneForExport(value) {
+  const raw = String(value || "");
+  const digits = raw.replace(/[^\d]/g, "");
+
+  if (digits.length < 9) return raw;
+
+  const tail = digits.slice(-3);
+
+  if (digits.startsWith("380")) {
+    return `380******${tail}`;
+  }
+
+  if (digits.startsWith("38") && digits.length >= 11) {
+    return `38******${tail}`;
+  }
+
+  return `${digits.slice(0, 2)}******${tail}`;
+}
+
+function redactSensitiveContextExport(text) {
+  return String(text || "").replace(
+    /\+?380[\d\s().-]{7,16}\d/g,
+    (match) => maskPhoneForExport(match)
+  );
+}
+
 async function sbGetAgentState(userId = "yulia") {
   try {
     const res = await fetch(
@@ -1411,7 +1437,7 @@ async function buildKuzyaContextExport(userId = "yulia") {
     continuityCheckpoint
   });
 
-  return `
+  const exportText = `
 KUZYA_CONTEXT_EXPORT_V1
 created_at: ${new Date().toISOString()}
 user_id: ${userId}
@@ -1446,6 +1472,8 @@ ${clipForDb(oneKuzyaContext || "нет", 7000)}
 
 КОНЕЦ KUZYA_CONTEXT_EXPORT_V1
 `.trim();
+
+  return redactSensitiveContextExport(exportText);
 }
 
 function createBridgeToken() {
