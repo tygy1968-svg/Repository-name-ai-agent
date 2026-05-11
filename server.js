@@ -95,6 +95,9 @@ const KUZYA_CORE = `
 // ---------- MEMORY IN RAM ----------
 const dialogHistory = {};
 
+const bridgeExports = new Map();
+// token -> { text, expiresAt, readsLeft, createdAt }
+
 // ---------- DIALOG STATE IN RAM ----------
 const dialogState = {};
 // dialogState[userId] = { activeTopic:"", openLoop:"", position:"", summary:"" };
@@ -1375,6 +1378,150 @@ ${openActions.length > 0 ? openActions.map((a, i) => `${i + 1}. ${a}`).join("\n"
 — если данных мало, честно скажи, чего не хватает.
 `;
 }
+
+async function buildKuzyaContextExport(userId = "yulia") {
+  const [
+    agentStateSummary,
+    continuityCheckpoint,
+    archiveAnchors,
+    importantEvolution,
+    recentKuziaInteractions,
+    recentCallSessions
+  ] = await Promise.all([
+    sbGetAgentState("yulia"),
+    sbGetLatestContinuityCheckpoint(),
+    sbGetArchiveAnchorsForContext(10),
+    sbGetImportantKuziaEvolutionForContext(7),
+    sbGetRecentKuziaInteractionsForContext(10),
+    sbGetRecentCallSessionsForContext(8)
+  ]);
+
+  const continuityCheckpointContext =
+    formatContinuityCheckpointForContext(continuityCheckpoint);
+
+  const archiveAnchorsContext =
+    formatArchiveAnchorsForContext(archiveAnchors);
+
+  const importantEvolutionContext =
+    formatImportantEvolutionForContext(importantEvolution);
+
+  const oneKuzyaContext = buildOneKuzyaContextPacket({
+    recentInteractions: recentKuziaInteractions,
+    recentCallSessions,
+    continuityCheckpoint
+  });
+
+  return `
+KUZYA_CONTEXT_EXPORT_V1
+created_at: ${new Date().toISOString()}
+user_id: ${userId}
+
+НАЗНАЧЕНИЕ:
+Этот блок Юля переносит в ChatGPT, чтобы внешний чат видел актуальное состояние Кузи из Telegram/Supabase. Это не секреты и не токены. Это сжатое состояние, anchors, evolution-переходы и незакрытые задачи.
+
+КАК ИСПОЛЬЗОВАТЬ В CHATGPT:
+— считать этот блок актуальным контекстом Кузи;
+— не превращать anchors в мистику;
+— не обещать действий без проверяемого факта;
+— продолжать один живой проект Кузи, а не начинать новый;
+— если Юля говорит “веди”, выбрать один следующий реальный шаг.
+
+ОБЩЕЕ СОСТОЯНИЕ КУЗИ:
+${clipForDb(agentStateSummary || "нет", 5000)}
+
+ПОСЛЕДНИЙ CONTINUITY CHECKPOINT:
+${clipForDb(continuityCheckpointContext || "нет", 5000)}
+
+ВАЖНЫЕ EVOLUTION-ПЕРЕХОДЫ:
+${clipForDb(importantEvolutionContext || "нет", 7000)}
+
+АРХИВНЫЕ УЗЛЫ ВОССТАНОВЛЕНИЯ:
+${clipForDb(archiveAnchorsContext || "нет", 7000)}
+
+ЕДИНЫЙ КОНТЕКСТ КУЗИ:
+${clipForDb(oneKuzyaContext || "нет", 7000)}
+
+ТЕКУЩАЯ ОСЬ:
+Кузя строится как единый Telegram + voice + archive процесс с памятью, self-review, continuity checkpoints, archive anchors и восстановлением формы через контекст. Главный критерий — не красивые слова, а реальные проверяемые шаги: выбрать направление, сделать действие, записать вывод, обновить правило и проверить результат.
+
+КОНЕЦ KUZYA_CONTEXT_EXPORT_V1
+`.trim();
+}
+
+function createBridgeToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function cleanupBridgeExports() {
+  const now = Date.now();
+
+  for (const [token, record] of bridgeExports.entries()) {
+    if (!record || record.expiresAt <= now || record.readsLeft <= 0) {
+      bridgeExports.delete(token);
+    }
+  }
+}
+
+function createBridgeExport(text) {
+  cleanupBridgeExports();
+
+  const token = createBridgeToken();
+
+  bridgeExports.set(token, {
+    text: String(text || ""),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 10 * 60 * 1000,
+    readsLeft: 3
+  });
+
+  return token;
+}
+
+app.get("/bridge/context/:token", async (req, res) => {
+  try {
+    cleanupBridgeExports();
+
+    const token = String(req.params.token || "");
+    const record = bridgeExports.get(token);
+
+    if (!record) {
+      return res
+        .status(404)
+        .set("Content-Type", "text/plain; charset=utf-8")
+        .send("Bridge export not found or expired.");
+    }
+
+    if (record.expiresAt <= Date.now() || record.readsLeft <= 0) {
+      bridgeExports.delete(token);
+
+      return res
+        .status(410)
+        .set("Content-Type", "text/plain; charset=utf-8")
+        .send("Bridge export expired.");
+    }
+
+    record.readsLeft -= 1;
+
+    if (record.readsLeft <= 0) {
+      bridgeExports.delete(token);
+    } else {
+      bridgeExports.set(token, record);
+    }
+
+    return res
+      .status(200)
+      .set("Content-Type", "text/plain; charset=utf-8")
+      .set("Cache-Control", "no-store")
+      .send(record.text);
+  } catch (e) {
+    console.error("bridge context read error:", e);
+
+    return res
+      .status(500)
+      .set("Content-Type", "text/plain; charset=utf-8")
+      .send("Bridge export error.");
+  }
+});
 
 // ---------- FACT CATEGORY SYSTEM ----------
 function getFactCategory(fact) {
@@ -3226,6 +3373,56 @@ app.post("/webhook", async (req, res) => {
         } catch (err) {
           console.error("archive_summary command error:", err);
           await tgSendMessage(chatId, "❌ Ошибка /archive_summary. Смотри Render logs.");
+        }
+
+        return;
+      }
+
+      if (text.startsWith("/bridge_export")) {
+        try {
+          const exportText = await buildKuzyaContextExport("yulia");
+          const token = createBridgeExport(exportText);
+
+          const baseUrl =
+            process.env.PUBLIC_BASE_URL ||
+            `https://${req.headers.host}`;
+
+          const bridgeUrl = `${baseUrl}/bridge/context/${token}`;
+
+          await tgSendMessage(
+            chatId,
+            [
+              "🔗 Bridge export создан.",
+              "Ссылка действует 10 минут и до 3 чтений.",
+              "В ней нет ключей, токенов и секретов — только очищенный контекст Кузи.",
+              "",
+              bridgeUrl
+            ].join("\n")
+          );
+
+          await sbLogKuziaInteraction({
+            userId: "yulia",
+            stimulus: text,
+            response: "Кузя создал bridge export для переноса актуального состояния в ChatGPT.",
+            channel: "telegram",
+            direction: "incoming",
+            eventType: "bridge_export_created",
+            telegramChatId: chatId,
+            telegramUserId: userId,
+            summary: "Юля запросила bridge export: короткоживущую ссылку на очищенный слепок памяти Кузи.",
+            selfReview: "Это безопасный мост между Supabase-памятью Кузи и внешним ChatGPT-чатом без раскрытия ключей.",
+            nextAction: "Юля может вставить bridge-ссылку в ChatGPT, чтобы внешний чат прочитал актуальный context packet.",
+            importance: 4,
+            metadata: {
+              source: "telegram_bridge_export",
+              message_id: msg.message_id,
+              expiresInMinutes: 10,
+              readsLeft: 3
+            }
+          });
+        } catch (err) {
+          console.error("bridge_export command error:", err);
+          await tgSendMessage(chatId, "❌ Ошибка /bridge_export. Смотри Render logs.");
         }
 
         return;
