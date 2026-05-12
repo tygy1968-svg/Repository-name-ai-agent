@@ -273,7 +273,7 @@ function formatArchiveAnchorsForContext(anchors = []) {
   }
 
   return anchors
-    .slice(0, 15)
+    .slice(0, 30)
     .map((anchor, index) => {
       return `
 ${index + 1}. [${anchor.anchor_type || "anchor"} | importance ${anchor.importance || 0}]
@@ -1416,7 +1416,7 @@ async function buildKuzyaContextExport(userId = "yulia") {
   ] = await Promise.all([
     sbGetAgentState("yulia"),
     sbGetLatestContinuityCheckpoint(),
-    sbGetArchiveAnchorsForContext(15),
+    sbGetArchiveAnchorsForContext(30),
     sbGetImportantKuziaEvolutionForContext(7),
     sbGetRecentKuziaInteractionsForContext(10),
     sbGetRecentCallSessionsForContext(8)
@@ -1651,7 +1651,7 @@ async function sbSaveFact(userId, fact) {
       apikey: SUPABASE_KEY,
       Authorization: `Bearer ${SUPABASE_KEY}`,
       "Content-Type": "application/json",
-      Prefer: "return=minimal"
+      Prefer: "return:minimal"
     },
     body: JSON.stringify([
       {
