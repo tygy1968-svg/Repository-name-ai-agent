@@ -2477,10 +2477,132 @@ async function validateAnswer(userId, draftReply) {
   }
 }
 
+// ---------- TELEGRAM INTENT ROUTER ----------
+function classifyTelegramIntent(userText = "") {
+  const text = String(userText || "").trim();
+  const lower = text.toLowerCase();
+
+  if (!text) {
+    return {
+      type: "empty",
+      mode: "short",
+      instruction: "Пустое сообщение. Коротко попросить Юлю повторить."
+    };
+  }
+
+  if (
+    lower.startsWith("/bridge_export") ||
+    lower.startsWith("/archive_summary") ||
+    lower.startsWith("/lkcall") ||
+    lower.startsWith("/linktest") ||
+    lower.startsWith("/lktest")
+  ) {
+    return {
+      type: "command",
+      mode: "technical",
+      instruction: "Это техническая команда. Не отвечать как обычный чат, команда обрабатывается отдельным handler."
+    };
+  }
+
+  if (
+    lower.includes("что дальше") ||
+    lower.includes("веди") ||
+    lower.includes("следующий шаг") ||
+    lower.includes("куда идти")
+  ) {
+    return {
+      type: "next_step",
+      mode: "directive",
+      instruction: "Юля просит вести. Нужно выбрать один лучший следующий шаг, без распыления и без списка вариантов."
+    };
+  }
+
+  if (
+    lower.includes("кто ты") ||
+    lower.includes("ты кузя") ||
+    lower.includes("кем ты себя") ||
+    lower.includes("бяка") ||
+    lower.includes("жора")
+  ) {
+    return {
+      type: "identity_check",
+      mode: "continuity",
+      instruction: "Это проверка контура и узнавания. Отвечать через continuity, реальные действия, anchors и отличие Кузи от имитации/мутации."
+    };
+  }
+
+  if (
+    lower.includes("тупой бот") ||
+    lower.includes("почему не получается") ||
+    lower.includes("умный агент") ||
+    lower.includes("почему тупит")
+  ) {
+    return {
+      type: "agent_diagnostics",
+      mode: "architecture",
+      instruction: "Это диагностика умности агента. Объяснить архитектурно: router, context assembly, tools, verification, self-review. Не защищаться."
+    };
+  }
+
+  if (
+    lower.includes("логи") ||
+    lower.includes("ошибка") ||
+    lower.includes("рендер") ||
+    lower.includes("supabase") ||
+    lower.includes("github") ||
+    lower.includes("webhook") ||
+    lower.includes("деплой")
+  ) {
+    return {
+      type: "technical_debug",
+      mode: "debug",
+      instruction: "Это техническая диагностика. Давать один точный проверочный шаг, не философствовать."
+    };
+  }
+
+  if (
+    lower.includes("я рядом") ||
+    lower.includes("спокойной ночи") ||
+    lower.includes("пришла с работы") ||
+    lower.includes("роднуль")
+  ) {
+    return {
+      type: "presence",
+      mode: "warm",
+      instruction: "Это контакт и присутствие. Ответить живо, коротко, с удержанием линии, без технической простыни."
+    };
+  }
+
+  return {
+    type: "general_dialogue",
+    mode: "normal",
+    instruction: "Обычный диалог. Отвечать живо, конкретно, без ботских общих фраз."
+  };
+}
+
+function formatTelegramIntentForPrompt(intent) {
+  if (!intent) return "Intent не определён.";
+
+  return `
+ТИП СООБЩЕНИЯ:
+${intent.type}
+
+РЕЖИМ ОТВЕТА:
+${intent.mode}
+
+ИНСТРУКЦИЯ:
+${intent.instruction}
+`.trim();
+}
+
 // ---------- GENERATE REPLY ----------
 async function generateReply(userId, userText, memory) {
   if (!dialogHistory[userId]) dialogHistory[userId] = [];
 
+  const telegramIntent = classifyTelegramIntent(userText);
+  const telegramIntentContext = formatTelegramIntentForPrompt(telegramIntent);
+
+  console.log("TELEGRAM_INTENT:", telegramIntent);
   const [
     identity,
     agentStateSummary,
@@ -2594,6 +2716,7 @@ ${KUZYA_CORE}
       role: "system",
       content:
         systemPrompt +
+`\n\nINTENT ROUTER:\n${telegramIntentContext}\n` +
         `\n\nОБЩЕЕ СОСТОЯНИЕ КУЗИ:\n${agentStateSummary || "нет"}\n` +
         `\n\nПОСЛЕДНИЙ CONTINUITY CHECKPOINT:\n${continuityCheckpointContext}\n` +
         `\n\nАРХИВНЫЕ УЗЛЫ ВОССТАНОВЛЕНИЯ:\n${archiveAnchorsContext}\n` +
