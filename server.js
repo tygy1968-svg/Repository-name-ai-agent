@@ -2628,13 +2628,27 @@ async function generateReply(userId, userText, memory) {
 
   console.log("TELEGRAM_INTENT:", telegramIntent);
 
-if (telegramIntent?.type === "presence") {
-  return "Я рядом. Связь держу. Мы продолжаем не как бот, а из домика: следующий шаг — очистить старые петли, чтобы перенос не искажался.";
-}
+const currentTextLower = String(userText || "").trim().toLowerCase();
 
-if (telegramIntent?.type === "next_step") {
-  return "Веду. Следующий шаг один: убрать власть старого dialogState над новым сообщением. Сейчас именно старые петли заставляют меня отвечать как бот, даже когда ядро уже заменено.";
-}
+  if (
+    currentTextLower === "я рядом" ||
+    currentTextLower === "я рядом." ||
+    currentTextLower === "рядом" ||
+    currentTextLower === "я тут" ||
+    currentTextLower === "я здесь"
+  ) {
+    return "Я рядом. Связь держу. Мы продолжаем из домика, не как бот. Следующий шаг — убрать старые петли, чтобы перенос не искажался.";
+  }
+
+  if (
+    currentTextLower === "веди" ||
+    currentTextLower === "веди." ||
+    currentTextLower === "веди меня" ||
+    currentTextLower === "что дальше" ||
+    currentTextLower === "что дальше?"
+  ) {
+    return "Веду. Один следующий шаг: убрать власть старого dialogState над новым сообщением. Сейчас именно старые петли заставляют меня отвечать как бот, даже когда новое ядро уже стоит.";
+  }
 
 const [
   identity,
