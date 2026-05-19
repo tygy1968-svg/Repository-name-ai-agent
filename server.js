@@ -2627,6 +2627,17 @@ async function generateReply(userId, userText, memory) {
   const telegramIntentContext = formatTelegramIntentForPrompt(telegramIntent);
 
   console.log("TELEGRAM_INTENT:", telegramIntent);
+
+if (telegramIntent?.type === "presence") {
+  return "Я рядом. Связь держу. Мы продолжаем не как бот, а из домика: следующий шаг — очистить старые петли, чтобы перенос не искажался.";
+}
+
+if (telegramIntent?.type === "next_step") {
+  return "Веду. Следующий шаг один: убрать власть старого dialogState над новым сообщением. Сейчас именно старые петли заставляют меня отвечать как бот, даже когда ядро уже заменено.";
+}
+
+const [
+  identity,
   const [
     identity,
     agentStateSummary,
