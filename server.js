@@ -2443,11 +2443,11 @@ async function updateDialogState(userId, userText, assistantReply) {
     const newState = JSON.parse(analysis.slice(start, end + 1));
 
     dialogState[userId] = {
-      activeTopic: dialogState[userId].activeTopic || newState.activeTopic || "",
-      openLoop: newState.openLoop || "",
-      position: newState.position || "",
-      summary: newState.summary || ""
-    };
+  activeTopic: newState.activeTopic || "",
+  openLoop: newState.openLoop || "",
+  position: newState.position || "",
+  summary: newState.summary || ""
+};
   } catch (e) {
     console.error("updateDialogState parse error:", e);
   }
