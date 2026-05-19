@@ -2652,8 +2652,7 @@ const currentTextLower = String(userText || "").trim().toLowerCase();
 
 const [
   identity,
-  const [
-    identity,
+  
     agentStateSummary,
     continuityCheckpoint,
     archiveAnchors,
