@@ -2420,6 +2420,8 @@ async function updateDialogState(userId, userText, assistantReply) {
     dialogState[userId] = { activeTopic: "", openLoop: "", position: "", summary: "" };
   }
 
+  const text = String(userText || "").trim().toLowerCase();
+
   const analysis = await openaiChat(
     [
       {
@@ -2435,7 +2437,10 @@ async function updateDialogState(userId, userText, assistantReply) {
 Ответ строго в JSON.
 `
       },
-      { role: "user", content: `Пользователь: ${userText}\nАссистент: ${assistantReply}` }
+      {
+        role: "user",
+        content: `Пользователь: ${userText}\nАссистент: ${assistantReply}`
+      }
     ],
     { temperature: 0.2, max_tokens: 200 }
   );
@@ -2447,12 +2452,27 @@ async function updateDialogState(userId, userText, assistantReply) {
 
     const newState = JSON.parse(analysis.slice(start, end + 1));
 
+    const hardResetTopic =
+      text.includes("веди") ||
+      text.includes("что дальше") ||
+      text.includes("следующий шаг") ||
+      text.includes("кто ты") ||
+      text.includes("что мы строим") ||
+      text.includes("почему тупит") ||
+      text.includes("почему кузя тупит") ||
+      text.includes("умный агент") ||
+      text.includes("я рядом");
+
     dialogState[userId] = {
-  activeTopic: newState.activeTopic || "",
-  openLoop: newState.openLoop || "",
-  position: newState.position || "",
-  summary: newState.summary || ""
-};
+      activeTopic: hardResetTopic
+        ? (newState.activeTopic || "")
+        : (newState.activeTopic || dialogState[userId].activeTopic || ""),
+      openLoop: newState.openLoop || "",
+      position: newState.position || "",
+      summary: newState.summary || ""
+    };
+
+    console.log("DIALOG_STATE_UPDATED:", dialogState[userId]);
   } catch (e) {
     console.error("updateDialogState parse error:", e);
   }
