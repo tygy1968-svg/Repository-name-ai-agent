@@ -1646,31 +1646,10 @@ async function sbGetIdentity(userId) {
 }
 
 async function sbSaveFact(userId, fact) {
+  // Append-only safety: never delete previous facts before a replacement
+  // is successfully stored. Conflicts are resolved during retrieval, not
+  // by destructive writes. This protects memory if embedding/insert fails.
   const category = getFactCategory(fact);
-
-  if (category === "name") {
-    await sbDeleteFactsByPattern(userId, ["Имя пользователя"]);
-  }
-  if (category === "location") {
-    await sbDeleteFactsByPattern(userId, ["Пользователь живет"]);
-  }
-  if (category === "brand") {
-    await sbDeleteFactsByPattern(userId, [
-      "Пользователь развивает бренд",
-      "Бренд называется",
-      "Пользователь имеет бренд"
-    ]);
-  }
-
-  if (category === "identity_core") {
-    await fetch(
-      `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core`,
-      {
-        method: "DELETE",
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-      }
-    );
-  }
 
   const embedding = await createEmbedding(fact);
 
