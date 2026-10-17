@@ -104,3 +104,24 @@ test("correction and obsolete fact both reach context, correction first", async 
     output.indexOf("РЕЛЕВАНТНЫЕ ЗАПИСИ"));
   assert.ok(output.includes("Previous assertion"));
 });
+
+test("failed correction retrieval does not silently return an empty list", async () => {
+  const ctx = {
+    SUPABASE_MEMORY_URL: "https://example.invalid/memory",
+    SUPABASE_KEY: "test",
+    URLSearchParams, Math, Number, String, console,
+    fetch: async () => ({ ok: false, status: 503 })
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extract("async function sbGetRefutedMemory(", "async function sbGetIdentity("), ctx);
+  await assert.rejects(ctx.sbGetRefutedMemory("example-user"), /Correction retrieval failed: HTTP 503/);
+});
+
+test("memory lookup failure marks remembered facts as unverified", () => {
+  const start = source.indexOf("    const [relevant, corrections] = await Promise.all([");
+  const end = source.indexOf("\n  let webContext = \"\";", start);
+  assert.ok(start >= 0 && end > start);
+  const snippet = source.slice(start, end);
+  assert.match(snippet, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
+  assert.match(snippet, /memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА/);
+});
