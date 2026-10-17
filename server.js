@@ -2885,11 +2885,15 @@ dialogState, openLoop и история диалога — это подсказ
         ...messages,
         {
           role: "system",
-          content: `Предыдущий ответ был слабым: ${validation.reason}\nУсиль связь с activeTopic. Закрой openLoop. Убери абстракции.`
+          content: `Предыдущий ответ не прошёл проверку: ${validation.reason}\nНе повторяй опровергнутые факты. Если сведения нельзя подтвердить, явно обозначь неопределённость. Ответь конкретно.`
         }
       ],
-      { temperature: 0.7, max_tokens: 450 }
+      { temperature: 0.5, max_tokens: 450 }
     );
+    const secondValidation = await validateAnswer(userId, draftReply, memoryContext);
+    if (secondValidation.isWeak) {
+      draftReply = "Не могу надёжно подтвердить ответ по доступным сведениям. Уточни, пожалуйста, какой факт нужно проверить.";
+    }
   }
 
   dialogHistory[userId].push({ role: "assistant", content: draftReply });
