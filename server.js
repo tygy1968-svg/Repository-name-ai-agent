@@ -1648,7 +1648,11 @@ async function sbGetRefutedMemory(userId, limit = 20) {
   if (!res.ok) {
     throw new Error(`Correction retrieval failed: HTTP ${res.status}`);
   }
-  return res.json();
+  const rows = await res.json();
+  if (!Array.isArray(rows) || rows.some(row => !row || typeof row.content !== "string")) {
+    throw new Error("Correction retrieval returned invalid data");
+  }
+  return rows;
 }
 
 async function sbGetIdentity(userId) {
