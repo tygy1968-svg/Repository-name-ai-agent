@@ -300,3 +300,12 @@ test("validator response without JSON is not treated as approval", async () => {
   const result = await ctx.validateAnswer("test-user", "Potentially incorrect");
   assert.equal(result.isWeak, true);
 });
+
+test("rewritten Telegram replies are checked again", () => {
+  const start = source.indexOf("async function generateReply(");
+  const end = source.indexOf("async function generateVisionReply(", start);
+  assert.ok(start >= 0 && end > start);
+  const code = source.slice(start, end);
+  assert.equal((code.match(/validateAnswer\(userId, draftReply, memoryContext\)/g) || []).length, 2);
+  assert.match(code, /if \(secondValidation\.isWeak\)/);
+});
