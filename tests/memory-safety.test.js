@@ -169,3 +169,39 @@ test("correction outage suppresses retrieved memories in assembled context", asy
   assert.match(output, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
   assert.doesNotMatch(output, /obsolete claim/);
 });
+
+test("vision memory context prioritizes refutations", async () => {
+  const start = source.indexOf('  let memoryContext = "";', source.indexOf("async function generateVisionReply("));
+  const end = source.indexOf("\n  const messages = [", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    sbGetRefutedMemory: async () => [{ content: "Old claim is refuted" }],
+    console: { error: () => {} }
+  };
+  vm.createContext(ctx);
+  const assemble = vm.runInContext(
+    "(async (userId, memory) => {" + source.slice(start, end) +
+    "; return memoryContext; })", ctx
+  );
+  const output = await assemble("example-user", [{ content: "Old claim" }]);
+  assert.ok(output.indexOf("Old claim is refuted") < output.indexOf("СТАРЫЕ ЗАПИСИ"));
+  assert.match(output, /ОПРОВЕРЖЕНИЯ/);
+});
+
+test("vision memory context does not expose old facts when corrections fail", async () => {
+  const start = source.indexOf('  let memoryContext = "";', source.indexOf("async function generateVisionReply("));
+  const end = source.indexOf("\n  const messages = [", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    sbGetRefutedMemory: async () => { throw new Error("offline"); },
+    console: { error: () => {} }
+  };
+  vm.createContext(ctx);
+  const assemble = vm.runInContext(
+    "(async (userId, memory) => {" + source.slice(start, end) +
+    "; return memoryContext; })", ctx
+  );
+  const output = await assemble("example-user", [{ content: "obsolete claim" }]);
+  assert.match(output, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
+  assert.doesNotMatch(output, /obsolete claim/);
+});
