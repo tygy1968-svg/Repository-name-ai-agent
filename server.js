@@ -1646,8 +1646,7 @@ async function sbGetRefutedMemory(userId, limit = 20) {
     headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
   });
   if (!res.ok) {
-    console.error("Correction retrieval failed:", res.status);
-    return [];
+    throw new Error(`Correction retrieval failed: HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -2736,6 +2735,9 @@ const [
     ].filter(Boolean).join("\n\n");
   } catch (e) {
     console.error("Memory search failed:", e);
+    // Do not present unverified remembered facts if corrections could not
+    // be loaded. This avoids silently reverting to stale memory.
+    memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА: поиск или загрузка опровержений недоступны. Не утверждай факты из прошлой памяти как достоверные.";
   }
 
   let webContext = "";
