@@ -74,3 +74,13 @@ test("Telegram response context includes corrections before semantic memory", ()
   assert.match(source, /sbGetRefutedMemory\(userId, 20\)/);
   assert.match(source, /Никогда не утверждай опровергнутый факт/);
 });
+
+test("correction context is placed before relevant facts", () => {
+  const code = source.slice(
+    source.indexOf("    const correctionText = corrections.map"),
+    source.indexOf("\n  } catch (e) {", source.indexOf("    const correctionText = corrections.map"))
+  );
+  assert.ok(code.includes("correctionText ?"));
+  assert.ok(code.indexOf("correctionText ?") < code.indexOf("relevantText ?"));
+  assert.ok(code.includes('.filter(Boolean).join('));
+});
