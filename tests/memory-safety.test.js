@@ -152,7 +152,7 @@ test("vector search failure is not mistaken for empty memory", async () => {
 });
 
 test("correction outage suppresses retrieved memories in assembled context", async () => {
-  const start = source.indexOf("  let memoryContext = \"\";\n  try {");
+  const start = source.indexOf("  let memoryContext = \"\";\n  try {", source.indexOf("    const [recentKuziaInteractions, recentCallSessions]"));
   const end = source.indexOf("\n  let webContext = \"\";", start);
   assert.ok(start >= 0 && end > start);
   const ctx = {
