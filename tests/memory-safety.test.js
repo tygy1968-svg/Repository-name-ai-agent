@@ -125,3 +125,15 @@ test("memory lookup failure marks remembered facts as unverified", () => {
   assert.match(snippet, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
   assert.match(snippet, /memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА/);
 });
+
+test("invalid correction response is rejected", async () => {
+  const ctx = {
+    SUPABASE_MEMORY_URL: "https://example.invalid/memory",
+    SUPABASE_KEY: "test",
+    URLSearchParams, Math, Number, String, Array, console,
+    fetch: async () => ({ ok: true, json: async () => ({ unexpected: "shape" }) })
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extract("async function sbGetRefutedMemory(", "async function sbGetIdentity("), ctx);
+  await assert.rejects(ctx.sbGetRefutedMemory("example-user"), /invalid data/);
+});
