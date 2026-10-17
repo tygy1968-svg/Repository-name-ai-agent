@@ -2533,13 +2533,13 @@ async function validateAnswer(userId, draftReply, memoryContext = "") {
   try {
     const start = validation.indexOf("{");
     const end = validation.lastIndexOf("}");
-    if (start === -1 || end === -1) return { isWeak: false, reason: "" };
+    if (start === -1 || end === -1) return { isWeak: true, reason: "Не удалось проверить ответ: некорректный результат валидатора" };
 
     const parsed = JSON.parse(validation.slice(start, end + 1));
     return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
   } catch (e) {
     console.error("validateAnswer parse error:", e);
-    return { isWeak: false, reason: "" };
+    return { isWeak: true, reason: "Не удалось проверить ответ: некорректный результат валидатора" };
   }
 }
 
