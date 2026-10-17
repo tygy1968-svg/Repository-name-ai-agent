@@ -1,0 +1,20 @@
+name: Kuzya memory lab tests
+on:
+  push:
+    branches:
+      - kuzya-memory-lab-20261017
+  workflow_dispatch:
+jobs:
+  memory-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check server syntax
+        run: node --check server.js
+      - name: Run memory regression tests
+        run: npm test
