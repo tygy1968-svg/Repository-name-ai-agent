@@ -150,3 +150,22 @@ test("vector search failure is not mistaken for empty memory", async () => {
   vm.runInContext(extract("async function sbSearchMemory(", "// ---------- CALL SESSIONS ----------"), ctx);
   await assert.rejects(ctx.sbSearchMemory("example-user", "question"), /Memory vector search failed: HTTP 503/);
 });
+
+test("correction outage suppresses retrieved memories in assembled context", async () => {
+  const start = source.indexOf("  let memoryContext = \"\";\n  try {");
+  const end = source.indexOf("\n  let webContext = \"\";", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    console: { error: () => {} },
+    sbSearchMemory: async () => [{ content: "obsolete claim" }],
+    sbGetRefutedMemory: async () => { throw new Error("database unavailable"); }
+  };
+  vm.createContext(ctx);
+  const run = vm.runInContext(
+    "(async (userId, userText) => {" + source.slice(start, end) +
+    "; return memoryContext; })", ctx
+  );
+  const output = await run("test-user", "question");
+  assert.match(output, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
+  assert.doesNotMatch(output, /obsolete claim/);
+});
