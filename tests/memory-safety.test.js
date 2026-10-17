@@ -137,3 +137,16 @@ test("invalid correction response is rejected", async () => {
   vm.runInContext(extract("async function sbGetRefutedMemory(", "async function sbGetIdentity("), ctx);
   await assert.rejects(ctx.sbGetRefutedMemory("example-user"), /invalid data/);
 });
+
+test("vector search failure is not mistaken for empty memory", async () => {
+  const ctx = {
+    SUPABASE_URL: "https://example.invalid",
+    SUPABASE_KEY: "test",
+    console, String, Array,
+    createEmbedding: async () => [0.1],
+    fetch: async () => ({ ok: false, status: 503 })
+  };
+  vm.createContext(ctx);
+  vm.runInContext(extract("async function sbSearchMemory(", "// ---------- CALL SESSIONS ----------"), ctx);
+  await assert.rejects(ctx.sbSearchMemory("example-user", "question"), /Memory vector search failed: HTTP 503/);
+});
