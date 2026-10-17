@@ -1725,11 +1725,15 @@ async function sbSearchMemory(userId, queryText, k = 5) {
   });
 
   if (!res.ok) {
-    console.error("vector search error:", await res.text());
-    return [];
+    console.error("vector search error:", res.status);
+    throw new Error(`Memory vector search failed: HTTP ${res.status}`);
   }
 
-  return res.json();
+  const rows = await res.json();
+  if (!Array.isArray(rows) || rows.some(row => !row || typeof row.content !== "string")) {
+    throw new Error("Memory vector search returned invalid data");
+  }
+  return rows;
 }
 
 // ---------- CALL SESSIONS ----------
