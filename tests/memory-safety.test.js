@@ -205,3 +205,38 @@ test("vision memory context does not expose old facts when corrections fail", as
   assert.match(output, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
   assert.doesNotMatch(output, /obsolete claim/);
 });
+
+test("voice memory context prioritizes corrections over semantic matches", async () => {
+  const start = source.indexOf('  let memoryContext = "";', source.indexOf("async function generateVoiceReply("));
+  const end = source.indexOf("\n  const cleanedMessages =", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    userText: "question",
+    userId: "voice:test",
+    sbSearchMemory: async () => [{ content: "outdated claim" }],
+    sbGetRefutedMemory: async () => [{ content: "outdated claim refuted" }],
+    console: { error: () => {} }
+  };
+  vm.createContext(ctx);
+  const assemble = vm.runInContext("(async () => {" + source.slice(start, end) + "; return memoryContext; })", ctx);
+  const output = await assemble();
+  assert.ok(output.indexOf("outdated claim refuted") < output.indexOf("РЕЛЕВАНТНЫЕ ЗАПИСИ"));
+});
+
+test("voice memory context fails closed when correction lookup fails", async () => {
+  const start = source.indexOf('  let memoryContext = "";', source.indexOf("async function generateVoiceReply("));
+  const end = source.indexOf("\n  const cleanedMessages =", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    userText: "question",
+    userId: "voice:test",
+    sbSearchMemory: async () => [{ content: "outdated claim" }],
+    sbGetRefutedMemory: async () => { throw new Error("offline"); },
+    console: { error: () => {} }
+  };
+  vm.createContext(ctx);
+  const assemble = vm.runInContext("(async () => {" + source.slice(start, end) + "; return memoryContext; })", ctx);
+  const output = await assemble();
+  assert.match(output, /ПАМЯТЬ НЕ ПРОВЕРЕНА/);
+  assert.doesNotMatch(output, /outdated claim/);
+});
