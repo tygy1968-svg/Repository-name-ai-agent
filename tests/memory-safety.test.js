@@ -84,3 +84,23 @@ test("correction context is placed before relevant facts", () => {
   assert.ok(code.indexOf("correctionText ?") < code.indexOf("relevantText ?"));
   assert.ok(code.includes('.filter(Boolean).join('));
 });
+
+test("correction and obsolete fact both reach context, correction first", async () => {
+  const start = source.indexOf("    const [relevant, corrections] = await Promise.all([");
+  const end = source.indexOf("\n  } catch (e) {", start);
+  assert.ok(start >= 0 && end > start);
+  const ctx = {
+    sbSearchMemory: async () => [{ content: "Previous assertion" }],
+    sbGetRefutedMemory: async () => [{ content: "Previous assertion was refuted" }]
+  };
+  vm.createContext(ctx);
+  const makeContext = vm.runInContext(
+    "(async (userId, userText) => { let memoryContext = ''; " +
+    source.slice(start, end) +
+    "; return memoryContext; })", ctx
+  );
+  const output = await makeContext("example-user", "Question");
+  assert.ok(output.indexOf("Previous assertion was refuted") <
+    output.indexOf("РЕЛЕВАНТНЫЕ ЗАПИСИ"));
+  assert.ok(output.includes("Previous assertion"));
+});
