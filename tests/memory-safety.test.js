@@ -282,3 +282,21 @@ test("Telegram answer validation passes its memory context", () => {
   const telegram = source.slice(source.indexOf("async function generateReply("), source.indexOf("async function generateVisionReply("));
   assert.match(telegram, /validateAnswer\(userId, draftReply, memoryContext\)/);
 });
+
+test("malformed validator response does not silently approve answer", async () => {
+  const block = extract("async function validateAnswer(", "// ---------- TELEGRAM INTENT ROUTER ----------");
+  const ctx = { dialogState: {}, openaiChat: async () => "invalid-json", console };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  const result = await ctx.validateAnswer("test-user", "Potentially incorrect", "ОПРОВЕРЖЕНИЯ: corrected");
+  assert.equal(result.isWeak, true);
+});
+
+test("validator response without JSON is not treated as approval", async () => {
+  const block = extract("async function validateAnswer(", "// ---------- TELEGRAM INTENT ROUTER ----------");
+  const ctx = { dialogState: {}, openaiChat: async () => "no structured result", console };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  const result = await ctx.validateAnswer("test-user", "Potentially incorrect");
+  assert.equal(result.isWeak, true);
+});
