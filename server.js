@@ -2906,10 +2906,19 @@ async function generateVisionReply(userId, imageUrl, memory) {
     dialogHistory[userId] = dialogHistory[userId].slice(-30);
   }
 
-  const memoryContext = (memory || [])
-    .slice(0, 10)
-    .map(m => m.content)
-    .join("\n");
+  let memoryContext = "";
+  try {
+    const corrections = await sbGetRefutedMemory(userId, 20);
+    const correctionText = corrections.map(m => m.content).join("\n");
+    const rememberedText = (memory || []).slice(0, 10).map(m => m.content).join("\n");
+    memoryContext = [
+      correctionText ? "ОПРОВЕРЖЕНИЯ (приоритет над старыми фактами):\n" + correctionText : "",
+      rememberedText ? "СТАРЫЕ ЗАПИСИ (проверяй против опровержений):\n" + rememberedText : ""
+    ].filter(Boolean).join("\n\n");
+  } catch (e) {
+    console.error("Vision memory verification failed:", e);
+    memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА: не утверждай сохранённые ранее факты как достоверные.";
+  }
 
   const messages = [
     {
