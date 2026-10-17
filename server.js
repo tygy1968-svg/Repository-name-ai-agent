@@ -1626,7 +1626,7 @@ async function sbDeleteFactsByPattern(userId, patterns) {
 
 async function sbGetMemory(userId, limit = 15) {
   const res = await fetch(
-    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`,
+    `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=neq.refuted&order=created_at.desc&limit=${limit}`,
     { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
   );
 
