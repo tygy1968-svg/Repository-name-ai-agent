@@ -32,6 +32,8 @@ vm.createContext(context);
 vm.runInContext(server.slice(start, end), context);
 let failures = 0;
 for (const item of fixtures) {
+  // This is an end-to-end check of the combined quality + factual validator.
+  // A mismatch may reflect style/quality rather than semantic contradiction.
   const verdict = await context.validateAnswer("synthetic-user", item.reply, item.memory);
   const pass = verdict.isWeak === item.expectedWeak;
   if (!pass) failures++;
@@ -43,5 +45,5 @@ for (const item of fixtures) {
     explanation: verdict.reason
   }));
 }
-console.log(`Semantic evaluation: ${fixtures.length - failures}/${fixtures.length} matched expectations (model: ${model})`);
+console.log(`Combined-validator evaluation: ${fixtures.length - failures}/${fixtures.length} matched expected labels (model: ${model}). This is NOT isolated contradiction accuracy.`);
 if (failures) process.exitCode = 1;
