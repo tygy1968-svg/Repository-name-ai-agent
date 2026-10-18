@@ -23,11 +23,13 @@ jobs:
       - name: Run memory regression tests
         run: npm test      
       - name: Install dependencies for semantic evaluation
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'lab: run six semantic contradiction tests once')
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'Run six semantic tests after YAML fix') }}
         run: npm install --ignore-scripts
 
       - name: Run six synthetic contradiction tests
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'lab: run six semantic contradiction tests once')
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'Run six semantic tests after YAML fix') }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVAL_MODEL: gpt-4o-mini
