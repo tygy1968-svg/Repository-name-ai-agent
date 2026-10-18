@@ -21,3 +21,27 @@ revoke all on public.kuzya_decision_ledger_lab from anon, authenticated;
 -- No policies: client roles cannot read or write. Never expose service_role credentials.
 -- Application-side append-only writes must be enforced through a dedicated role and grants
 -- before this schema is used. No UPDATE or DELETE permissions should be granted.
+
+-- A trigger protects old rows even if a powerful application role has
+-- UPDATE/DELETE privileges. A database owner can still alter this trigger;
+-- this is not an immutable audit log against privileged administrators.
+create or replace function public.kuzya_decision_ledger_lab_prevent_mutation()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  raise exception 'Laboratory decision events are append-only'
+    using errcode = '42501';
+end;
+$$;
+
+drop trigger if exists kuzya_decision_ledger_lab_no_mutation
+  on public.kuzya_decision_ledger_lab;
+
+create trigger kuzya_decision_ledger_lab_no_mutation
+before update or delete on public.kuzya_decision_ledger_lab
+for each row execute function public.kuzya_decision_ledger_lab_prevent_mutation();
+
+-- No TRUNCATE grant is provided to application roles. Table owners and
+-- privileged database administrators remain outside this protection.
