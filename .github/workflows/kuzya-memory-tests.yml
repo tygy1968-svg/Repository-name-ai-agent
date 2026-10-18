@@ -23,11 +23,11 @@ jobs:
       - name: Run memory regression tests
         run: npm test      
       - name: Install dependencies for semantic evaluation
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'push'
         run: npm install --ignore-scripts
 
       - name: Run six synthetic contradiction tests
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'push'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVAL_MODEL: gpt-4o-mini
