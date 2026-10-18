@@ -309,3 +309,21 @@ test("rewritten Telegram replies are checked again", () => {
   assert.equal((code.match(/validateAnswer\(userId, draftReply, memoryContext\)/g) || []).length, 2);
   assert.match(code, /if \(secondValidation\.isWeak\)/);
 });
+
+test("validator rejects a JSON object without a boolean verdict", async () => {
+  const block = extract("async function validateAnswer(", "// ---------- TELEGRAM INTENT ROUTER ----------");
+  const ctx = { dialogState: {}, openaiChat: async () => '{"reason":"uncertain"}', console };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  const result = await ctx.validateAnswer("fictional-user", "Fictional claim", "ОПРОВЕРЖЕНИЯ: fictional claim denied");
+  assert.equal(result.isWeak, true);
+});
+
+test("validator accepts an explicit clean verdict", async () => {
+  const block = extract("async function validateAnswer(", "// ---------- TELEGRAM INTENT ROUTER ----------");
+  const ctx = { dialogState: {}, openaiChat: async () => '{"isWeak":false,"reason":""}', console };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  const result = await ctx.validateAnswer("fictional-user", "No disputed claims");
+  assert.equal(result.isWeak, false);
+});
