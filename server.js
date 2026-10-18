@@ -2536,7 +2536,8 @@ async function validateAnswer(userId, draftReply, memoryContext = "") {
     if (start === -1 || end === -1) return { isWeak: true, reason: "Не удалось проверить ответ: некорректный результат валидатора" };
 
     const parsed = JSON.parse(validation.slice(start, end + 1));
-    return { isWeak: parsed.isWeak === true, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
+    if (typeof parsed.isWeak !== "boolean") return { isWeak: true, reason: "Валидатор не вернул обязательный логический результат" };
+    return { isWeak: parsed.isWeak, reason: typeof parsed.reason === "string" ? parsed.reason : "" };
   } catch (e) {
     console.error("validateAnswer parse error:", e);
     return { isWeak: true, reason: "Не удалось проверить ответ: некорректный результат валидатора" };
