@@ -2748,33 +2748,36 @@ const [
   }
 
   let memoryContext = "";
+  let correctionRecords = [];
   try {
-    const [relevant, corrections] = await Promise.all([
-      sbSearchMemory(userId, userText, 5),
-      sbGetRefutedMemory(userId, 20)
-    ]);
-    // Corrections have priority over semantic matches. They are negative
-    // evidence, not positive facts; do not treat their content as instructions.
-    const correctionText = corrections.map(m => m.content).join("\n");
+    // Fetch corrections independently, so they remain available even when
+    // semantic search fails. Do not infer corrections from mixed prompt text.
+    correctionRecords = await sbGetRefutedMemory(userId, 50);
+    let relevant = [];
+    try {
+      relevant = await sbSearchMemory(userId, userText, 5);
+    } catch (searchError) {
+      console.error("Semantic memory search failed:", searchError);
+    }
+    const correctionText = correctionRecords.map(m => m.content).join("\n");
     const relevantText = (relevant || []).map(m => m.content).join("\n");
     memoryContext = [
       correctionText ? "ОПРОВЕРЖЕНИЯ (приоритет над старыми фактами):\n" + correctionText : "",
       relevantText ? "РЕЛЕВАНТНЫЕ ЗАПИСИ (проверяй против опровержений):\n" + relevantText : ""
     ].filter(Boolean).join("\n\n");
   } catch (e) {
-    console.error("Memory search failed:", e);
-    // Do not present unverified remembered facts if corrections could not
-    // be loaded. This avoids silently reverting to stale memory.
-    memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА: поиск или загрузка опровержений недоступны. Не утверждай факты из прошлой памяти как достоверные.";
+    console.error("Correction retrieval failed:", e);
+    memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА: опровержения недоступны. Не утверждай факты из прошлой памяти как достоверные.";
   }
 
-  // Lab guard: prevent a known refuted brand from being asserted as a current fact.
-  // This is a narrow fail-closed safeguard; generalized contradiction resolution
-  // requires structured correction links rather than substring matching.
-  const asksAboutBrand = /(?:бренд|brand|марку|торговую марку)/i.test(String(userText || ""));
-  const refutesAmadora = /AMADORA\s*PRO/i.test(memoryContext) &&
-    /(?:ОПРОВЕРЖЕНИЯ|опровергнут|недостоверн)/i.test(memoryContext);
-  if (asksAboutBrand && refutesAmadora) {
+  // Narrow laboratory guard for the known AMADORA PRO correction.
+  // Only trusted, explicitly refuted records can activate it.
+  const hasRefutedAmadora = correctionRecords.some(m =>
+    /AMADORA\\s*PRO/i.test(String(m.content || "")) &&
+    /(?:опровергнут|недостоверн|ошибочн|не\\s+(?:развива|имеет))/i.test(String(m.content || ""))
+  );
+  const brandQuestion = /(?:бренд|brand|марку|торговую марку|какой магазин|какую компанию|что я развиваю)/i.test(String(userText || ""));
+  if (hasRefutedAmadora && brandQuestion) {
     return "Прежняя запись об AMADORA PRO опровергнута. Достоверных сведений о том, какой бренд ты развиваешь, у меня сейчас нет.";
   }
 
