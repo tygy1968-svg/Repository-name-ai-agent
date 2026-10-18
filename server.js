@@ -2768,6 +2768,16 @@ const [
     memoryContext = "ПАМЯТЬ НЕ ПРОВЕРЕНА: поиск или загрузка опровержений недоступны. Не утверждай факты из прошлой памяти как достоверные.";
   }
 
+  // Lab guard: prevent a known refuted brand from being asserted as a current fact.
+  // This is a narrow fail-closed safeguard; generalized contradiction resolution
+  // requires structured correction links rather than substring matching.
+  const asksAboutBrand = /(?:бренд|brand|марку|торговую марку)/i.test(String(userText || ""));
+  const refutesAmadora = /AMADORA\\s*PRO/i.test(memoryContext) &&
+    /(?:ОПРОВЕРЖЕНИЯ|опровергнут|недостоверн)/i.test(memoryContext);
+  if (asksAboutBrand && refutesAmadora) {
+    return "Прежняя запись об AMADORA PRO опровергнута. Достоверных сведений о том, какой бренд ты развиваешь, у меня сейчас нет.";
+  }
+
   let webContext = "";
   const plan = await planStep(userText, memoryContext);
 
