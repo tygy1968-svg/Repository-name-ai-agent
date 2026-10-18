@@ -18,5 +18,7 @@ jobs:
         run: node --check server.js
       - name: Check evaluation script syntax
         run: node --check scripts/evaluate-refutations.mjs
+      - name: Check isolated contradiction benchmark syntax
+        run: node --check scripts/evaluate-contradictions.mjs
       - name: Run memory regression tests
         run: npm test
