@@ -2494,7 +2494,9 @@ async function updateDialogState(userId, userText, assistantReply) {
 async function validateAnswer(userId, draftReply, memoryContext = "") {
   const state = dialogState[userId] || {};
 
-  const validation = await openaiChat(
+  let validation;
+  try {
+    validation = await openaiChat(
     [
       {
         role: "system",
@@ -2528,7 +2530,11 @@ async function validateAnswer(userId, draftReply, memoryContext = "") {
       }
     ],
     { temperature: 0.2, max_tokens: 200 }
-  );
+    );
+  } catch (e) {
+    console.error("validateAnswer request failed:", e);
+    return { isWeak: true, reason: "Проверка ответа недоступна" };
+  }
 
   try {
     const start = validation.indexOf("{");
