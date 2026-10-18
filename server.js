@@ -35,6 +35,7 @@ const SUPABASE_KUZIA_EVOLUTION_URL = `${SUPABASE_URL}/rest/v1/kuzia_evolution`;
 const SUPABASE_CHAT_ARCHIVES_URL = `${SUPABASE_URL}/rest/v1/chat_archives`;
 const SUPABASE_CHAT_ARCHIVE_SUMMARIES_URL = `${SUPABASE_URL}/rest/v1/chat_archive_summaries`;
 const SUPABASE_CHAT_ARCHIVE_ANCHORS_URL = `${SUPABASE_URL}/rest/v1/chat_archive_anchors`;
+const KUZYA_OWNER_USER_ID = "yulia";
 
 const KUZYA_CORE = `
 Ты — Кузя.
@@ -3259,7 +3260,10 @@ app.post("/webhook", async (req, res) => {
 
   (async () => {
     const { id: chatId } = msg.chat;
-    const { id: userId } = msg.from;
+    const { id: telegramUserId } = msg.from;
+    // Canonical continuity owner. Transport identifiers remain metadata only.
+    // This keeps Telegram, voice and continuity retrieval in one memory namespace.
+    const userId = KUZYA_OWNER_USER_ID;
 
     try {
       // PHOTO
@@ -3285,7 +3289,7 @@ app.post("/webhook", async (req, res) => {
           direction: "incoming",
           eventType: "telegram_photo",
           telegramChatId: chatId,
-          telegramUserId: userId,
+          telegramUserId,
           summary: "Юля отправила фото в Telegram, Кузя проанализировал изображение и ответил.",
           selfReview: "Фото-взаимодействие сохранено в общем журнале, чтобы оно было частью единой истории Кузи.",
           nextAction: "",
@@ -3376,7 +3380,7 @@ app.post("/webhook", async (req, res) => {
             eventType: "inbound_linktest_created",
             callSessionId: result.inbound?.id || null,
             telegramChatId: chatId,
-            telegramUserId: userId,
+            telegramUserId,
             normalizedPhone: normalizePhoneForMemory(phoneNumber),
             summary: result.relatedOutbound
               ? "Тестовая входящая сессия связана с последним исходящим звонком по normalized_phone."
@@ -3455,7 +3459,7 @@ app.post("/webhook", async (req, res) => {
             eventType: "lkcall_requested",
             callSessionId: result.callSessionId || null,
             telegramChatId: chatId,
-            telegramUserId: userId,
+            telegramUserId,
             normalizedPhone: normalizePhoneForMemory(result.to),
             summary: `Юля запустила исходящий звонок через Telegram. Инструкция звонка: ${instruction}`,
             selfReview: "Этот звонок должен восприниматься Кузей как продолжение Telegram-задачи, а не как отдельный изолированный эпизод.",
@@ -3642,7 +3646,7 @@ app.post("/webhook", async (req, res) => {
           const archiveIngest = await ingestArchiveSummaryFromTelegram({
             text,
             telegramChatId: chatId,
-            telegramUserId: userId,
+            telegramUserId,
             messageId: msg.message_id
           });
 
@@ -3664,7 +3668,7 @@ app.post("/webhook", async (req, res) => {
             direction: "incoming",
             eventType: "archive_summary_ingested",
             telegramChatId: chatId,
-            telegramUserId: userId,
+            telegramUserId,
             summary: `Юля перенесла архивную выжимку: ${archiveIngest.result.title}`,
             selfReview: "Кузя принял архивный continuity extract и разложил его на summary, anchors и transition, чтобы использовать для восстановления формы в будущих ответах.",
             nextAction: "Подключить archive anchors к context assembler.",
@@ -3726,7 +3730,7 @@ app.post("/webhook", async (req, res) => {
             direction: "incoming",
             eventType: "bridge_export_created",
             telegramChatId: chatId,
-            telegramUserId: userId,
+            telegramUserId,
             summary: "Юля запросила bridge export: короткоживущую ссылку на очищенный слепок памяти Кузи.",
             selfReview: "Это безопасный мост между Supabase-памятью Кузи и внешним ChatGPT-чатом без раскрытия ключей.",
             nextAction: "Юля может вставить bridge-ссылку в ChatGPT, чтобы внешний чат прочитал актуальный context packet.",
@@ -3770,7 +3774,7 @@ app.post("/webhook", async (req, res) => {
         direction: "incoming",
         eventType: "telegram_message",
         telegramChatId: chatId,
-        telegramUserId: userId,
+        telegramUserId,
         summary: dialogState[userId]?.summary || "Telegram-диалог Юли с Кузей.",
         selfReview: "Кузя ответил в Telegram. Это взаимодействие сохранено как часть единой истории между Telegram, звонками и будущими входящими.",
         nextAction: dialogState[userId]?.openLoop || "",
@@ -3785,7 +3789,7 @@ app.post("/webhook", async (req, res) => {
         userText: text,
         assistantReply: reply,
         telegramChatId: chatId,
-        telegramUserId: userId,
+        telegramUserId,
         messageId: msg.message_id
       });
     } catch (e) {
