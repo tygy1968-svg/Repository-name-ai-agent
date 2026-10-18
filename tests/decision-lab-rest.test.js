@@ -50,3 +50,15 @@ test("fails closed on rejected writes and invalid read responses", async () => {
   await assert.rejects(() => readLabDecisions(options), /403/);
   await assert.rejects(() => readLabDecisions({ ...base, fetchImpl: async () => ({ ok: true, json: async () => ({ unexpected: true }) }) }), /response/);
 });
+
+test("never sends credentials to a non-Supabase host", async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls++; throw new Error("Should not call network"); };
+  await assert.rejects(() => readLabDecisions({
+    ...base, url: "https://evil.example/rest/v1/kuzya_decision_ledger_lab", fetchImpl
+  }), /Supabase host/);
+  await assert.rejects(() => readLabDecisions({
+    ...base, url: "https://example.supabase.co.evil.example/rest/v1/kuzya_decision_ledger_lab", fetchImpl
+  }), /Supabase host/);
+  assert.equal(calls, 0);
+});
