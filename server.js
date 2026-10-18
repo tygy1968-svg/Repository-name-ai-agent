@@ -3261,9 +3261,9 @@ app.post("/webhook", async (req, res) => {
   (async () => {
     const { id: chatId } = msg.chat;
     const { id: telegramUserId } = msg.from;
-    // Canonical continuity owner. Transport identifiers remain metadata only.
-    // This keeps Telegram, voice and continuity retrieval in one memory namespace.
-    const userId = KUZYA_OWNER_USER_ID;
+    // Telegram memory is person-scoped: keep the transport identity here.
+    // Kuzya continuity/state uses KUZYA_OWNER_USER_ID separately.
+    const userId = telegramUserId;
 
     try {
       // PHOTO
