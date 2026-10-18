@@ -3749,8 +3749,12 @@ app.post("/webhook", async (req, res) => {
       const facts = await extractFacts(text);
       console.log("Extracted facts:", facts);
 
+      // Laboratory safety: extraction is not verification.
+      // Preserve candidates in the existing interaction log; never auto-promote
+      // experimental or quoted statements to durable facts.
+      // Explicitly confirmed facts need a separate audited write path.
       if (facts.length > 0) {
-        await Promise.all(facts.map(f => sbSaveFact(userId, f)));
+        console.log("LAB_FACT_CANDIDATES_NOT_SAVED:", facts.length);
       }
 
       const memory = await sbGetMemory(userId);
