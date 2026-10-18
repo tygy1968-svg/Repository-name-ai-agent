@@ -21,4 +21,14 @@ jobs:
       - name: Check isolated contradiction benchmark syntax
         run: node --check scripts/evaluate-contradictions.mjs
       - name: Run memory regression tests
-        run: npm test
+        run: npm test      
+      - name: Install dependencies for semantic evaluation
+        if: github.event_name == 'workflow_dispatch'
+        run: npm install --ignore-scripts
+
+      - name: Run six synthetic contradiction tests
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVAL_MODEL: gpt-4o-mini
+        run: node scripts/evaluate-contradictions.mjs
