@@ -341,3 +341,21 @@ test("validator request failure does not approve an unchecked answer", async () 
   assert.equal(result.isWeak, true);
   assert.match(result.reason, /Проверка ответа недоступна/);
 });
+
+test("synthetic refutation fixtures have valid, balanced verdicts", () => {
+  const fixturePath = new URL("./fixtures/refutation-evaluation.json", import.meta.url);
+  const data = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+  assert.ok(Array.isArray(data.cases));
+  assert.equal(data.cases.length, 6);
+  const ids = new Set();
+  for (const item of data.cases) {
+    assert.equal(typeof item.id, "string");
+    assert.ok(item.id.length > 0 && !ids.has(item.id));
+    ids.add(item.id);
+    assert.ok(typeof item.memory === "string" && item.memory.length > 0);
+    assert.ok(typeof item.reply === "string" && item.reply.length > 0);
+    assert.equal(typeof item.expectedWeak, "boolean");
+  }
+  assert.ok(data.cases.some((item) => item.expectedWeak === true));
+  assert.ok(data.cases.some((item) => item.expectedWeak === false));
+});
