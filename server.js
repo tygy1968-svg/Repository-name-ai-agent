@@ -169,7 +169,7 @@ function redactSensitiveContextExport(text) {
   );
 }
 
-async function sbGetAgentState(userId = "yulia") {
+async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
   try {
     const res = await fetch(
       `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
@@ -210,7 +210,7 @@ async function sbGetLatestContinuityCheckpoint() {
     ].join(",");
 
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.yulia&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
+      `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.${encodeURIComponent(KUZYA_OWNER_USER_ID)}&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -271,7 +271,7 @@ async function sbGetArchiveAnchorsForContext(limit = 8) {
     ].join(",");
 
     const res = await fetch(
-      `${SUPABASE_CHAT_ARCHIVE_ANCHORS_URL}?user_id=eq.yulia&select=${select}&order=importance.desc,created_at.desc&limit=${limit}`,
+      `${SUPABASE_CHAT_ARCHIVE_ANCHORS_URL}?user_id=eq.${encodeURIComponent(KUZYA_OWNER_USER_ID)}&select=${select}&order=importance.desc,created_at.desc&limit=${limit}`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -332,7 +332,7 @@ async function sbGetImportantKuziaEvolutionForContext(limit = 5) {
     ].join(",");
 
     const res = await fetch(
-      `${SUPABASE_KUZIA_EVOLUTION_URL}?user_id=eq.yulia&event_type=not.is.null&importance=gte.4&select=${select}&order=timestamp.desc&limit=${limit}`,
+      `${SUPABASE_KUZIA_EVOLUTION_URL}?user_id=eq.${encodeURIComponent(KUZYA_OWNER_USER_ID)}&event_type=not.is.null&importance=gte.4&select=${select}&order=timestamp.desc&limit=${limit}`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -649,7 +649,7 @@ async function sbInsertKuziaEvolutionTransition({
   try {
     const payload = [
       {
-        user_id: "yulia",
+        user_id: KUZYA_OWNER_USER_ID,
         change: clipForDb(transition.change, 5000),
         timestamp: new Date().toISOString(),
         event_type: transition.event_type || "self_review_transition",
@@ -704,7 +704,7 @@ async function sbUpdateAgentStateFromEvolution(transition) {
     const summary = clipForDb(transition.new_agent_state_summary, 5000);
 
     const updateRes = await fetch(
-      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.yulia`,
+      `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(KUZYA_OWNER_USER_ID)}`,
       {
         method: "PATCH",
         headers: {
@@ -746,7 +746,7 @@ async function maybeWriteKuziaEvolutionFromTelegram({
 
   try {
     const [agentStateSummary, continuityCheckpoint] = await Promise.all([
-      sbGetAgentState("yulia"),
+      sbGetAgentState(KUZYA_OWNER_USER_ID),
       sbGetLatestContinuityCheckpoint()
     ]);
 
@@ -977,7 +977,7 @@ async function sbInsertArchiveSummary({
 
   const archivePayload = [
     {
-      user_id: "yulia",
+      user_id: KUZYA_OWNER_USER_ID,
       title: archiveData.title || title || "Архивный чат",
       source: "telegram_archive_summary",
       status: "finished",
@@ -1021,7 +1021,7 @@ async function sbInsertArchiveSummary({
   const summaryPayload = [
     {
       archive_id: archive.id,
-      user_id: "yulia",
+      user_id: KUZYA_OWNER_USER_ID,
       title: archiveData.title || title || "Архивный чат",
       short_summary: clipForDb(archiveData.short_summary, 5000),
       deep_summary: clipForDb(archiveData.deep_summary, 10000),
@@ -1057,7 +1057,7 @@ async function sbInsertArchiveSummary({
   if (anchors.length > 0) {
     const anchorPayload = anchors.map((anchor) => ({
       archive_id: archive.id,
-      user_id: "yulia",
+      user_id: KUZYA_OWNER_USER_ID,
       anchor_type: anchor.anchor_type || "checkpoint",
       anchor_text: clipForDb(anchor.anchor_text, 5000),
       why_it_matters: clipForDb(anchor.why_it_matters, 5000),
@@ -1135,7 +1135,7 @@ async function ingestArchiveSummaryFromTelegram({
   }
 
   const [agentStateSummary, continuityCheckpoint] = await Promise.all([
-    sbGetAgentState("yulia"),
+    sbGetAgentState(KUZYA_OWNER_USER_ID),
     sbGetLatestContinuityCheckpoint()
   ]);
 
@@ -1179,7 +1179,7 @@ async function ingestArchiveSummaryFromTelegram({
 }
 
 async function sbLogKuziaInteraction({
-  userId = "yulia",
+  userId = KUZYA_OWNER_USER_ID,
   stimulus = "",
   response = "",
   evolutionLevel = 1.0,
@@ -1200,7 +1200,7 @@ async function sbLogKuziaInteraction({
   try {
     const payload = [
       {
-        user_id: String(userId || "yulia"),
+        user_id: String(userId || KUZYA_OWNER_USER_ID),
         stimulus: clipForDb(stimulus),
         response: clipForDb(response),
         evolution_level: evolutionLevel,
@@ -1274,7 +1274,7 @@ async function sbGetRecentKuziaInteractionsForContext(limit = 10) {
     ].join(",");
 
     const res = await fetch(
-      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.yulia&select=${select}&order=timestamp.desc&limit=${limit}`,
+      `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.${encodeURIComponent(KUZYA_OWNER_USER_ID)}&select=${select}&order=timestamp.desc&limit=${limit}`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -1435,7 +1435,7 @@ ${openActions.length > 0 ? openActions.map((a, i) => `${i + 1}. ${a}`).join("\n"
 `;
 }
 
-async function buildKuzyaContextExport(userId = "yulia") {
+async function buildKuzyaContextExport(userId = KUZYA_OWNER_USER_ID) {
   const [
     agentStateSummary,
     continuityCheckpoint,
@@ -1444,7 +1444,7 @@ async function buildKuzyaContextExport(userId = "yulia") {
     recentKuziaInteractions,
     recentCallSessions
   ] = await Promise.all([
-    sbGetAgentState("yulia"),
+    sbGetAgentState(KUZYA_OWNER_USER_ID),
     sbGetLatestContinuityCheckpoint(),
     sbGetArchiveAnchorsForContext(30),
     sbGetImportantKuziaEvolutionForContext(7),
@@ -2716,7 +2716,7 @@ const [
     importantEvolution
   ] = await Promise.all([
     sbGetIdentity(userId),
-    sbGetAgentState("yulia"),
+    sbGetAgentState(KUZYA_OWNER_USER_ID),
     sbGetLatestContinuityCheckpoint(),
     sbGetArchiveAnchorsForContext(8),
     sbGetImportantKuziaEvolutionForContext(5)
@@ -3282,7 +3282,7 @@ app.post("/webhook", async (req, res) => {
         await tgSendMessage(chatId, reply);
 
         await sbLogKuziaInteraction({
-          userId: "yulia",
+          userId: KUZYA_OWNER_USER_ID,
           stimulus: "[Пользователь отправил фото]",
           response: reply,
           channel: "telegram",
@@ -3370,7 +3370,7 @@ app.post("/webhook", async (req, res) => {
           });
 
           await sbLogKuziaInteraction({
-            userId: "yulia",
+            userId: KUZYA_OWNER_USER_ID,
             stimulus: text,
             response: result.relatedOutbound
               ? `Создана тестовая inbound call_session и связана с outbound ${result.relatedOutbound.id}.`
@@ -3451,7 +3451,7 @@ app.post("/webhook", async (req, res) => {
           );
 
           await sbLogKuziaInteraction({
-            userId: "yulia",
+            userId: KUZYA_OWNER_USER_ID,
             stimulus: text,
             response: `Создан исходящий LiveKit-звонок на ${result.to}. session=${result.callSessionId || "null"}`,
             channel: "outbound_call",
@@ -3661,7 +3661,7 @@ app.post("/webhook", async (req, res) => {
           }
 
           await sbLogKuziaInteraction({
-            userId: "yulia",
+            userId: KUZYA_OWNER_USER_ID,
             stimulus: clipForDb(text, 3000),
             response: `Архивная выжимка перенесена. Archive=${archiveIngest.result.archiveId}`,
             channel: "telegram",
@@ -3702,7 +3702,7 @@ app.post("/webhook", async (req, res) => {
 
       if (text.startsWith("/bridge_export")) {
         try {
-          const exportText = await buildKuzyaContextExport("yulia");
+          const exportText = await buildKuzyaContextExport(KUZYA_OWNER_USER_ID);
           const token = createBridgeExport(exportText);
 
           const baseUrl =
@@ -3723,7 +3723,7 @@ app.post("/webhook", async (req, res) => {
           );
 
           await sbLogKuziaInteraction({
-            userId: "yulia",
+            userId: KUZYA_OWNER_USER_ID,
             stimulus: text,
             response: "Кузя создал bridge export для переноса актуального состояния в ChatGPT.",
             channel: "telegram",
@@ -3767,7 +3767,7 @@ app.post("/webhook", async (req, res) => {
       await tgSendMessage(chatId, reply);
 
       await sbLogKuziaInteraction({
-        userId: "yulia",
+        userId: KUZYA_OWNER_USER_ID,
         stimulus: text,
         response: reply,
         channel: "telegram",
@@ -4373,7 +4373,7 @@ app.post("/openai-realtime-webhook", async (req, res) => {
         });
 
         await sbLogKuziaInteraction({
-          userId: "yulia",
+          userId: KUZYA_OWNER_USER_ID,
           stimulus: "OpenAI realtime incoming SIP call.",
           response: inboundLink?.relatedOutbound
             ? `Настоящий входящий звонок связан с outbound ${inboundLink.relatedOutbound.id}.`
