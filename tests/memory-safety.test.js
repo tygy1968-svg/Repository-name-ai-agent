@@ -327,3 +327,17 @@ test("validator accepts an explicit clean verdict", async () => {
   const result = await ctx.validateAnswer("fictional-user", "No disputed claims");
   assert.equal(result.isWeak, false);
 });
+
+test("validator request failure does not approve an unchecked answer", async () => {
+  const block = extract("async function validateAnswer(", "// ---------- TELEGRAM INTENT ROUTER ----------");
+  const ctx = {
+    dialogState: {},
+    openaiChat: async () => { throw new Error("fictional network outage"); },
+    console: { error() {} }
+  };
+  vm.createContext(ctx);
+  vm.runInContext(block, ctx);
+  const result = await ctx.validateAnswer("fictional-user", "Unverified statement");
+  assert.equal(result.isWeak, true);
+  assert.match(result.reason, /Проверка ответа недоступна/);
+});
