@@ -1,0 +1,36 @@
+name: Kuzya memory lab tests
+on:
+  push:
+    branches:
+      - kuzya-memory-lab-20261017
+  workflow_dispatch:
+jobs:
+  memory-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check server syntax
+        run: node --check server.js
+      - name: Check evaluation script syntax
+        run: node --check scripts/evaluate-refutations.mjs
+      - name: Check isolated contradiction benchmark syntax
+        run: node --check scripts/evaluate-contradictions.mjs
+      - name: Run memory regression tests
+        run: npm test      
+      - name: Install dependencies for semantic evaluation
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'Run six semantic tests after YAML fix') }}
+        run: npm install --ignore-scripts
+
+      - name: Run six synthetic contradiction tests
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'Run six semantic tests after YAML fix') }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVAL_MODEL: gpt-4o-mini
+        run: node scripts/evaluate-contradictions.mjs
