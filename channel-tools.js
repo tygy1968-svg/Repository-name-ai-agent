@@ -1,6 +1,15 @@
 import crypto from 'node:crypto';
 import { OWNER_TELEGRAM_ID, formatContext } from './unified-context.js';
 
+// Existing workspace chat, verified from historical owner messages in Supabase.
+export const OWNER_WORKSPACE_CHAT_ID = '-1003870803501';
+export function isOwnerTelegramMessage(message) {
+  if (String(message?.from?.id) !== OWNER_TELEGRAM_ID) return false;
+  const chat = message?.chat;
+  return (chat?.type === 'private' && String(chat.id) === OWNER_TELEGRAM_ID) ||
+    (['group', 'supergroup'].includes(chat?.type) && String(chat.id) === OWNER_WORKSPACE_CHAT_ID);
+}
+
 export const webhookSecret = token => crypto.createHmac('sha256', token).update('kuzya-telegram-webhook-v1').digest('hex');
 export function validWebhookSecret(received, expected) {
   const a = Buffer.from(String(received || '')), b = Buffer.from(expected);

@@ -252,3 +252,43 @@ test('actual Telegram route rejects spoofing and issues pairing code only in own
   assert.equal(app.outbound.length, 1);
   assert.equal((await fetch(base + '/internal/voice-tool', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 403);
 });
+
+
+for (const privateAvailable of [true, false]) {
+  test(`workspace /voice handles private delivery ${privateAvailable ? 'success' : 'failure without leaking code'}`, async (t) => {
+    const express = (await import('express')).default;
+    let server;
+    const sent = [];
+    const wrapper = Object.assign(function () {
+      const app = express(), listen = app.listen.bind(app);
+      app.listen = (...args) => { server = listen(...args); return server; }; return app;
+    }, express);
+    let done;
+    const delivered = new Promise(resolve => { done = resolve; });
+    await loadApplication('server.js', { express: { default: wrapper } }, {
+      PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
+    }, { fetch: async (url, options) => {
+      if (url.endsWith('/getMe')) return Response.json({ ok: true, result: { username: 'TestKuzyaBot' } });
+      assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
+      const body = JSON.parse(options.body); sent.push(body);
+      if (String(body.chat_id) === '1087968824') {
+        assert.match(body.text, /Код для общей памяти/);
+        return privateAvailable ? Response.json({ ok: true }) : Response.json({ ok: false, error_code: 403 }, { status: 403 });
+      }
+      assert.equal(String(body.chat_id), '-1003870803501');
+      assert.doesNotMatch(body.text, /\b[0-9]{6}\b/);
+      if (privateAvailable) assert.match(body.text, /Код отправлен/);
+      else { assert.match(body.text, /Не получилось отправить код/); assert.match(body.text, /https:\/\/t.me\/TestKuzyaBot/); }
+      done(); return Response.json({ ok: true });
+    } });
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    if (!server.listening) await once(server, 'listening');
+    const result = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': webhookSecret('test-only') },
+      body: JSON.stringify({ message: { from: { id: 1087968824 }, chat: { id: -1003870803501, type: 'supergroup' }, text: '/voice' } })
+    });
+    assert.equal(result.status, 200);
+    await Promise.race([delivered, new Promise((_,reject) => { const timer = setTimeout(() => reject(new Error('delivery timeout')), 2000); timer.unref(); })]);
+    assert.equal(sent.length, 2);
+  });
+}

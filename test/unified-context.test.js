@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { OWNER_TELEGRAM_ID, createContextStore, selectMemories } from '../unified-context.js';
-import { createVoiceAccess, createVoiceToolHandler, attachRealtimeTools, searchInternet, webhookSecret, validWebhookSecret } from '../channel-tools.js';
+import { isOwnerTelegramMessage, OWNER_WORKSPACE_CHAT_ID, createVoiceAccess, createVoiceToolHandler, attachRealtimeTools, searchInternet, webhookSecret, validWebhookSecret } from '../channel-tools.js';
 
 test('shared context works without embeddings, excludes refutations and model claims, isolates users', async () => {
   let reads = 0;
@@ -109,4 +109,13 @@ test('Telegram delivery authentication cannot be forged by an owner ID in a JSON
   assert.equal(validWebhookSecret('', secret), false);
   assert.equal(validWebhookSecret('1087968824', secret), false);
   assert.equal(validWebhookSecret(secret, secret), true);
+});
+
+test('owner can use existing workspace and private chat, but other members and groups remain isolated', () => {
+  const message = { from: { id: OWNER_TELEGRAM_ID }, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'supergroup' } };
+  assert.equal(isOwnerTelegramMessage(message), true);
+  assert.equal(isOwnerTelegramMessage({ ...message, from: { id: 'other' } }), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: '-1', type: 'supergroup' } }), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_TELEGRAM_ID, type: 'private' } }), true);
+  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'channel' } }), false);
 });
