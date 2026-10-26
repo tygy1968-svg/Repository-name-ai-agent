@@ -3,8 +3,10 @@ import * as openai from "@livekit/agents-plugin-openai";
 import { RoomServiceClient } from "livekit-server-sdk";
 import { z } from "zod";
 import { fileURLToPath } from "node:url";
+import { createCallLifecycle } from "./call-lifecycle.js";
 
-console.log("AGENT_VERSION: one_kuzya_context_bridge_2026_05_07");
+console.log("AGENT_VERSION: call_lifecycle_fix_2026_10_26");
+console.log("KUZYA_MODEL_CONFIG:", { channel: "livekit", model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime", voice: process.env.OPENAI_REALTIME_VOICE || "verse" });
 
 const {
   SUPABASE_URL,
@@ -157,19 +159,23 @@ function getLiveKitHttpUrl() {
 }
 
 async function withTimeout(promise, ms, label) {
-  return await Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
-    )
-  ]);
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(5000) });
 }
 
 async function sbGetAgentState(userId = KUZYA_OWNER_USER_ID) {
   if (!hasSupabase()) return "";
 
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${SUPABASE_AGENT_STATE_URL}?user_id=eq.${encodeURIComponent(userId)}&select=summary&limit=1`,
       {
         headers: supabaseHeaders()
@@ -205,7 +211,7 @@ async function sbGetLatestContinuityCheckpoint() {
       "importance"
     ].join(",");
 
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${SUPABASE_URL}/rest/v1/kuzia_evolution?user_id=eq.${KUZYA_OWNER_USER_ID}&event_type=eq.continuity_checkpoint&select=${select}&order=timestamp.desc&limit=1`,
       {
         headers: supabaseHeaders()
@@ -244,7 +250,7 @@ async function sbGetCallSession(callSessionId) {
   if (!hasSupabase() || !callSessionId) return null;
 
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}&select=*&limit=1`,
       {
         headers: supabaseHeaders()
@@ -268,7 +274,7 @@ async function sbUpdateCallSession(callSessionId, patch = {}) {
   if (!hasSupabase() || !callSessionId) return null;
 
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${SUPABASE_CALL_SESSIONS_URL}?id=eq.${encodeURIComponent(callSessionId)}`,
       {
         method: "PATCH",
@@ -321,7 +327,7 @@ async function sbGetRecentKuziaInteractions(limit = 8) {
       "importance"
     ].join(",");
 
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${SUPABASE_KUZIA_INTERACTIONS_URL}?user_id=eq.${KUZYA_OWNER_USER_ID}&select=${select}&order=timestamp.desc&limit=${limit}`,
       {
         headers: supabaseHeaders()
@@ -406,7 +412,7 @@ async function sbLogKuziaInteraction({
       }
     ];
 
-    const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
+    const res = await fetchWithTimeout(SUPABASE_KUZIA_INTERACTIONS_URL, {
       method: "POST",
       headers: {
         ...supabaseHeaders(),
@@ -442,7 +448,7 @@ async function sbLogKuziaEvolution(change) {
   if (!hasSupabase()) return false;
 
   try {
-    const res = await fetch(SUPABASE_KUZIA_EVOLUTION_URL, {
+    const res = await fetchWithTimeout(SUPABASE_KUZIA_EVOLUTION_URL, {
       method: "POST",
       headers: {
         ...supabaseHeaders(),
@@ -476,7 +482,7 @@ async function tgSendMessage(chatId, text) {
   if (!TELEGRAM_TOKEN || !chatId) return false;
 
   try {
-    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+    const res = await fetchWithTimeout(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -650,97 +656,6 @@ ${voiceCallPlanText}
 `;
 }
 
-async function waitForSipActive(ctx, participant, timeoutMs = 45000) {
-  const start = Date.now();
-  let current = participant;
-
-  while (Date.now() - start < timeoutMs) {
-    const fresh =
-      ctx.room?.remoteParticipants?.get?.(current.identity) ||
-      current;
-
-    current = fresh;
-
-    const status =
-      current?.attributes?.["sip.callStatus"] ||
-      current?.attributes?.["sip.call_status"] ||
-      "";
-
-    console.log("KUZYA LIVEKIT SIP STATUS:", {
-      identity: current.identity,
-      status,
-      attributes: current.attributes
-    });
-
-    if (status === "active") {
-      return current;
-    }
-
-    await sleep(250);
-  }
-
-  console.log("KUZYA LIVEKIT SIP STATUS TIMEOUT:", {
-    identity: current?.identity,
-    attributes: current?.attributes
-  });
-
-  return current;
-}
-
-async function waitForCallEnd(ctx, participant, timeoutMs = 15 * 60 * 1000) {
-  const start = Date.now();
-  const identity = participant?.identity;
-
-  while (Date.now() - start < timeoutMs) {
-    const current =
-      identity && ctx.room?.remoteParticipants?.get?.(identity)
-        ? ctx.room.remoteParticipants.get(identity)
-        : null;
-
-    if (!current) {
-      return {
-        ended: true,
-        reason: "participant_disconnected",
-        identity,
-        attributes: null
-      };
-    }
-
-    const status =
-      current?.attributes?.["sip.callStatus"] ||
-      current?.attributes?.["sip.call_status"] ||
-      "";
-
-    console.log("KUZYA WAIT_FOR_CALL_END STATUS:", {
-      identity,
-      status,
-      attributes: current.attributes
-    });
-
-    if (
-      ["hangup", "disconnected", "ended", "inactive"].includes(
-        String(status).toLowerCase()
-      )
-    ) {
-      return {
-        ended: true,
-        reason: `sip_status_${status}`,
-        identity,
-        attributes: current.attributes
-      };
-    }
-
-    await sleep(1000);
-  }
-
-  return {
-    ended: false,
-    reason: "call_end_wait_timeout",
-    identity,
-    attributes: null
-  };
-}
-
 class KuzyaAgent extends voice.Agent {
   constructor(chatCtx, instructions, tools = {}) {
     super({
@@ -847,6 +762,8 @@ export default defineAgent({
     });
 
     await ctx.connect();
+    const lifecycle = createCallLifecycle(ctx.room);
+    ctx.addShutdownCallback(async () => lifecycle.markEnded("job_shutdown"));
 
     const session = new voice.AgentSession({
       llm: new openai.realtime.RealtimeModel({
@@ -867,6 +784,7 @@ export default defineAgent({
         : null;
 
     let hangupStarted = false;
+    let hangupCompleted = false;
 
     const endCall = llm.tool({
       description:
@@ -928,10 +846,8 @@ export default defineAgent({
             roomName: ctx.room?.name || null
           });
 
-          return {
-            ok: false,
-            error: "room_service_or_room_missing"
-          };
+          hangupStarted = false;
+          return { ok: false, error: "room_service_or_room_missing" };
         }
 
         try {
@@ -941,6 +857,8 @@ export default defineAgent({
             "LiveKit deleteRoom"
           );
 
+          hangupCompleted = true;
+          lifecycle.markEnded("agent_hangup");
           await sbLogKuziaInteraction({
             stimulus: "LiveKit room deleted by endCall.",
             response: "Кузя физически завершил звонок через удаление LiveKit room.",
@@ -969,6 +887,7 @@ export default defineAgent({
             room: ctx.room.name
           };
         } catch (e) {
+          if (!hangupCompleted) hangupStarted = false;
           console.error("KUZYA_END_CALL_DELETE_ROOM_ERROR:", e);
 
           await sbLogKuziaInteraction({
@@ -1001,25 +920,19 @@ export default defineAgent({
       }
     });
 
-    await session.start({
-      room: ctx.room,
-      agent: new KuzyaAgent(initialCtx, runtimeInstructions, {
-        endCall
-      })
-    });
-
+    try {
     let participant;
 
     try {
-      participant = await ctx.waitForParticipant();
+      participant = await withTimeout(ctx.waitForParticipant(), 45000, "SIP participant");
     } catch (e) {
       console.error("KUZYA WAIT_FOR_PARTICIPANT_FAILED:", e);
 
       if (callSessionId) {
         await sbUpdateCallSession(callSessionId, {
-          status: "room_disconnected_before_participant",
-          summary: "LiveKit-комната закрылась до появления телефонного участника.",
-          self_review: "Звонок не дошёл до стадии активного разговора: участник не появился в комнате до её закрытия.",
+          status: "participant_wait_failed",
+          summary: "Телефонный участник не появился: ожидание завершилось ошибкой или тайм-аутом.",
+          self_review: "Звонок не дошёл до стадии активного разговора: появление участника не подтверждено.",
           metadata: {
             ...(callSession?.metadata || {}),
             participantWaitFailedAt: new Date().toISOString(),
@@ -1031,15 +944,15 @@ export default defineAgent({
 
       await sbLogKuziaInteraction({
         stimulus: "waitForParticipant failed.",
-        response: "LiveKit-комната закрылась до появления телефонного участника.",
+        response: "Телефонный участник не появился: ожидание завершилось ошибкой или тайм-аутом.",
         channel: "outbound_call",
         direction: "internal",
-        eventType: "room_disconnected_before_participant",
+        eventType: "participant_wait_failed",
         callSessionId: callSessionId || null,
         telegramChatId: metadata.chatId || null,
         telegramUserId: metadata.userId || null,
         normalizedPhone,
-        summary: "Звонок не дошёл до стадии участника: комната отключилась во время ожидания participant.",
+        summary: "Звонок не дошёл до стадии участника: ожидание participant завершилось неуспешно.",
         selfReview: "Кузя корректно зафиксировал неуспешную попытку звонка вместо падения без записи.",
         nextAction: "Проверить SIP/LiveKit-соединение или повторить звонок.",
         importance: 3,
@@ -1083,7 +996,35 @@ export default defineAgent({
       }
     });
 
-    const activeParticipant = await waitForSipActive(ctx, participant);
+    const answer = await lifecycle.waitForAnswer(participant);
+    if (!answer.answered) {
+      const status = answer.reason === "answer_timeout" ? "no_answer" : "disconnected_before_answer";
+      console.log("KUZYA_CALL_NOT_ANSWERED:", { callSessionId, reason: answer.reason });
+      const cancelUnanswered = async () => {
+        if (!roomService || !ctx.room?.name || ctx.room.isConnected === false) return;
+        try { await withTimeout(roomService.deleteRoom(ctx.room.name), 5000, "Cancel unanswered call"); }
+        catch (error) { console.error("KUZYA_CANCEL_UNANSWERED_FAILED:", error.message); }
+      };
+      await Promise.all([
+        cancelUnanswered(),
+        tgSendMessage(metadata.chatId, "📞 Ответ на звонок не подтверждён. Разговор не начался."),
+        callSessionId ? sbUpdateCallSession(callSessionId, {
+          status, summary: "Активное соединение не подтверждено; разговор не начался.",
+          metadata: { ...(callSession?.metadata || {}), endReason: answer.reason }
+        }) : Promise.resolve(),
+        sbLogKuziaInteraction({ stimulus: "SIP answer was not confirmed", response: "Разговор не начался.",
+          channel: "outbound_call", direction: "internal", eventType: status,
+          callSessionId, telegramChatId: metadata.chatId, normalizedPhone,
+          summary: "Нет подтверждённого SIP active; первая реплика не отправлялась.",
+          metadata: { reason: answer.reason } })
+      ]);
+      return;
+    }
+    const activeParticipant = answer.participant;
+    await session.start({
+      room: ctx.room,
+      agent: new KuzyaAgent(initialCtx, runtimeInstructions, { endCall })
+    });
 
     await sbLogKuziaInteraction({
       stimulus: "After waitForSipActive.",
@@ -1216,8 +1157,8 @@ ${instruction}
         telegramUserId: metadata.userId || null,
         normalizedPhone,
         summary: "Кузя не смог отправить первую голосовую реплику, потому что голосовая сессия закрывалась.",
-        selfReview: "Нужно использовать более быструю realtime-модель или предварительный план, чтобы не задерживать старт звонка.",
-        nextAction: "Вернуть OPENAI_REALTIME_MODEL на gpt-realtime и тестировать снова.",
+        selfReview: "Первая реплика не подтверждена. Причина сохранена в initialReplyError; закрытие соединения и ошибка модели требуют различной диагностики.",
+        nextAction: "Проверить initialReplyError и события отключения перед повторным тестом.",
         importance: 4,
         metadata: {
           source: metadata.source || "unknown",
@@ -1266,14 +1207,10 @@ ${instruction}
       }
     });
 
-    const callEnd = await waitForCallEnd(
-      ctx,
-      activeParticipant || participant,
-      15 * 60 * 1000
-    );
+    const callEnd = await lifecycle.waitForEnd();
 
-    if (callSessionId) {
-      await sbUpdateCallSession(callSessionId, {
+    await Promise.all([
+      callSessionId ? sbUpdateCallSession(callSessionId, {
         status: callEnd.ended ? "ended" : "end_wait_timeout",
         summary: callEnd.ended
           ? "Звонок завершён: участник отключился или SIP-статус показал завершение."
@@ -1287,10 +1224,9 @@ ${instruction}
           callEndReason: callEnd.reason,
           oneKuzyaBridge: true
         }
-      });
-    }
+      }) : Promise.resolve(),
 
-    await sbLogKuziaInteraction({
+    sbLogKuziaInteraction({
       stimulus: "Call ended or call-end wait finished.",
       response: callEnd.ended
         ? "Голосовой звонок завершён."
@@ -1318,9 +1254,9 @@ ${instruction}
         participantIdentity: callEnd.identity || null,
         participantAttributes: callEnd.attributes || null
       }
-    });
+    }),
 
-    await sbLogKuziaEvolution(
+    sbLogKuziaEvolution(
       callEnd.ended
         ? [
             "Звонок завершён корректно.",
@@ -1334,9 +1270,9 @@ ${instruction}
             "Вывод: нужно уточнить механизм определения завершения звонка через LiveKit/SIP.",
             "Следующий слой: проверить call_end_wait_timeout и способ закрытия комнаты."
           ].join("\n")
-    );
+    ),
 
-    await tgSendMessage(
+    tgSendMessage(
       metadata.chatId,
       callEnd.ended
         ? [
@@ -1351,7 +1287,13 @@ ${instruction}
             "Кузя записал это как call_end_wait_timeout.",
             "Нужно будет проверить механизм завершения звонка."
           ].join("\n")
-    );
+    ),
+    ]);
+    } finally {
+      lifecycle.dispose();
+      session.shutdown({ drain: false, reason: "call_entry_finished" });
+      ctx.shutdown("call_entry_finished");
+    }
   }
 });
 
@@ -1361,3 +1303,4 @@ cli.runApp(
     agentName: "kuzya-agent"
   })
 );
+
