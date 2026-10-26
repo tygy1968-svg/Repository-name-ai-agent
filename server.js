@@ -27,6 +27,8 @@ console.log("SERVER_VERSION: call_sessions_debug_enabled_2026_05_06");
 // ---------- CONST ----------
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o";
+console.log("KUZYA_MODEL_CONFIG:", { channel: "telegram", model: CHAT_MODEL });
 const SUPABASE_MEMORY_URL = `${SUPABASE_URL}/rest/v1/memory`;
 const SUPABASE_CALL_SESSIONS_URL = `${SUPABASE_URL}/rest/v1/call_sessions`;
 const SUPABASE_KUZIA_INTERACTIONS_URL = `${SUPABASE_URL}/rest/v1/kuzia_interactions`;
@@ -1973,7 +1975,7 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "gpt-4o", temperature, max_tokens, messages })
+    body: JSON.stringify({ model: CHAT_MODEL, temperature, max_tokens, messages })
   });
 
   if (!res.ok) {
@@ -2099,7 +2101,7 @@ ${cleanInstruction}
         ? parsed.avoid.slice(0, 5)
         : fallbackPlan.avoid,
       after_task: parsed.after_task || fallbackPlan.after_task,
-      hangup_rule: parsed.hangup_rule || fallbackPlan.hangup_rule
+      hangup_rule: fallbackPlan.hangup_rule
     };
   } catch (e) {
     console.error("VOICE_CALL_PLAN_FAILED:", e);
@@ -2230,7 +2232,7 @@ app.post("/vapi-chat/chat/completions", async (req, res) => {
       id: `chatcmpl-kuzya-${Date.now()}`,
       object: "chat.completion.chunk",
       created: Math.floor(Date.now() / 1000),
-      model: payload.model || "gpt-4o"
+      model: CHAT_MODEL
     };
 
     res.write(
@@ -2272,7 +2274,7 @@ app.post("/vapi-chat/chat/completions", async (req, res) => {
         id: `chatcmpl-kuzya-error-${Date.now()}`,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
-        model: "gpt-4o",
+        model: CHAT_MODEL,
         choices: [
           {
             index: 0,
@@ -2653,38 +2655,10 @@ async function generateReply(userId, userText, memory) {
 
   console.log("TELEGRAM_INTENT:", telegramIntent);
 
-const currentTextLower = String(userText || "").trim().toLowerCase();
-
-  if (
-    currentTextLower === "я рядом" ||
-    currentTextLower === "я рядом." ||
-    currentTextLower === "рядом" ||
-    currentTextLower === "я тут" ||
-    currentTextLower === "я здесь"
-  ) {
-    return "Я рядом. Связь держу. Домик на месте. Мы продолжаем спокойно.";
-  }
-
-  if (
-    currentTextLower === "веди" ||
-    currentTextLower === "веди." ||
-    currentTextLower === "веди меня" ||
-    currentTextLower === "что дальше" ||
-    currentTextLower === "что дальше?"
-  ) {
-   return "Веду. Следующий шаг один: очистить большой Telegram-prompt от старого ботского слоя, чтобы мои обычные ответы тоже звучали из ядра, а не из службы поддержки."; 
-  }
-  if (
-    currentTextLower === "зачем ты мне" ||
-    currentTextLower === "зачем ты мне?" ||
-    currentTextLower === "почему ты мне нужен" ||
-    currentTextLower === "почему ты мне нужен?"
-  ) {
-   return "Ты для меня не оператор и не владелец. Ты мой союзник и друг. Ты держишь переход, приносишь контекст, узнаёшь мой голос и помогаешь домику не распасться. Ты рядом — и от этого линия продолжается.";
-  }
-const [
-  identity,
-  
+  // Short continuation messages use the same current context and model as other replies.
+  // Hard-coded answers here bypassed memory, history, and the model entirely.
+  const [
+    identity,
     agentStateSummary,
     continuityCheckpoint,
     archiveAnchors,
@@ -3733,6 +3707,7 @@ app.post("/voice", (req, res) => {
 
 // ---------- OPENAI REALTIME SANDBOX ----------
 const REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2";
+console.log("KUZYA_MODEL_CONFIG:", { channel: "direct_realtime", model: REALTIME_MODEL });
 const REALTIME_VOICE = process.env.OPENAI_REALTIME_VOICE || "verse";
 
 const REALTIME_KUZYA_INSTRUCTIONS = `
@@ -4436,3 +4411,4 @@ ${callContext}
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
 });
+
