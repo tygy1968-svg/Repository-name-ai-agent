@@ -172,3 +172,48 @@ test('short Telegram phrases use the configured model and current message', asyn
     assert.ok(requests.some(r => r.body.messages.some(m => m.role === 'user' && m.content === phrase)));
   }
 });
+
+test('actual inbound webhook uses dialogue context and attaches a passive observer', async (t) => {
+  const express = (await import('express')).default;
+  const inbound = await import('../inbound-voice.js');
+  let server, observed, accepted;
+  const wrapper = Object.assign(function () {
+    const app = express(); const listen = app.listen.bind(app);
+    app.listen = (...args) => { server = listen(...args); return server; }; return app;
+  }, express);
+  const app = await loadApplication('server.js', {
+    express: { default: wrapper },
+    './inbound-voice.js': { ...inbound, observeRealtimeCall(options) { observed = options; return { socket: new EventEmitter() }; } }
+  }, { PORT: 0, TELEGRAM_TOKEN: 'test', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake', OPENAI_REALTIME_MODEL: 'gpt-realtime' }, {
+    fetch: async (url, options) => {
+      if (url.includes('/rpc/find_latest_outbound_call_by_phone')) return Response.json([{ id: 'old-call', instruction: 'Спроси, хорошо ли тебя слышно.' }]);
+      if (url.startsWith('https://database.invalid/rest/v1/call_sessions') && options.method === 'POST') return Response.json([{ id: 'new-call' }]);
+      if (url.includes('event_type=in.')) {
+        const params = new URL(url).searchParams;
+        assert.equal(params.get('normalized_phone'), 'eq.380670000001');
+        return Response.json([{ event_type: 'voice_user_transcript', stimulus: 'Поговорим о магазине.' }]);
+      }
+      if (url.startsWith('https://database.invalid/')) return Response.json([]);
+      assert.equal(url, 'https://api.openai.com/v1/realtime/calls/offline-call/accept');
+      accepted = JSON.parse(options.body); return new Response('', { status: 200 });
+    }
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  if (!server.listening) await once(server, 'listening');
+  const result = await fetch(`http://127.0.0.1:${server.address().port}/openai-realtime-webhook`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'offline-event', type: 'realtime.call.incoming', data: { call_id: 'offline-call', sip_headers: [{ name: 'From', value: '<sip:+380670000001@test.invalid>' }] } })
+  });
+  assert.equal((await result.json()).accepted, true);
+  assert.equal(accepted.model, 'gpt-realtime');
+  assert.match(accepted.instructions, /Поговорим о магазине/);
+  assert.match(accepted.instructions, /Это входящий звонок/);
+  assert.equal(accepted.audio.input.turn_detection.silence_duration_ms, 800);
+  assert.equal(accepted.audio.input.transcription.language, undefined);
+  assert.equal(observed.callId, 'offline-call');
+  await observed.onRecord({ type: 'voice_user_transcript', role: 'user', text: 'Тестовая реплика.', interpretation: 'asr_may_differ_from_audio' });
+  const saved = app.outbound.find(r => r.body?.[0]?.event_type === 'voice_user_transcript').body[0];
+  assert.equal(saved.call_session_id, 'new-call');
+  assert.equal(saved.normalized_phone, '380670000001');
+  assert.equal(saved.stimulus, 'Тестовая реплика.');
+});
