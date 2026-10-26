@@ -1,3 +1,4 @@
+import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
 import { SipClient, AgentDispatchClient } from "livekit-server-sdk";
@@ -1196,7 +1197,8 @@ async function sbLogKuziaInteraction({
   selfReview = "",
   nextAction = "",
   importance = 0,
-  metadata = {}
+  metadata = {},
+  requestTimeoutMs = null
 } = {}) {
   try {
     const payload = [
@@ -1227,6 +1229,7 @@ async function sbLogKuziaInteraction({
 
     const res = await fetch(SUPABASE_KUZIA_INTERACTIONS_URL, {
       method: "POST",
+      ...(requestTimeoutMs ? { signal: AbortSignal.timeout(requestTimeoutMs) } : {}),
       headers: {
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
@@ -4140,94 +4143,31 @@ function extractIncomingPhoneFromRealtimeEvent(event) {
   return extractPhoneFromSipHeaderValue(fromHeader);
 }
 
-function getRealtimeCallContext({ incomingPhone = "", inboundLink = null } = {}) {
-  const pending = pendingRealtimeOutboundCall;
-  const isFresh =
-    pending &&
-    pending.createdAt &&
-    Date.now() - pending.createdAt < 3 * 60 * 1000;
-
-  if (isFresh) {
-    return `
-Это исходящий звонок, который Юля запустила из Telegram.
-
-Кому звоним:
-${pending.phoneNumber}
-
-Задача звонка:
-${pending.instruction || "нет отдельной инструкции"}
-
-Правила исходящего звонка:
-— когда человек ответит, сразу выполни задачу
-— не спрашивай "чем могу помочь"
-— не говори технические детали
-— говори коротко, живо и уверенно
-— если человек не понимает, кто звонит, объясни: "Это Кузя, я звоню по просьбе Юли"
-`;
+async function getRecentVoiceTurns(incomingPhone) {
+  const phone = normalizePhoneForMemory(incomingPhone);
+  if (!phone) return [];
+  try {
+    const query = new URLSearchParams({
+      normalized_phone: `eq.${phone}`,
+      event_type: "in.(voice_user_transcript,voice_assistant_transcript)",
+      select: "event_type,stimulus,response,timestamp",
+      order: "timestamp.desc", limit: "12",
+      timestamp: `gte.${new Date(Date.now() - 7 * 86400000).toISOString()}`
+    });
+    const result = await fetch(`${SUPABASE_KUZIA_INTERACTIONS_URL}?${query}`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+      signal: AbortSignal.timeout(2500)
+    });
+    if (!result.ok) throw new Error(`voice context HTTP ${result.status}`);
+    const rows = await result.json();
+    return Array.isArray(rows) ? rows.reverse() : [];
+  } catch (error) {
+    console.error("KUZYA_INBOUND_CONTEXT_UNAVAILABLE", error.message);
+    return [];
   }
-
-  const relatedOutbound = inboundLink?.relatedOutbound || null;
-  const inbound = inboundLink?.inbound || null;
-
-  if (incomingPhone && relatedOutbound) {
-    return `
-Это входящий звонок.
-Человек сам перезвонил Кузе.
-
-Номер входящего:
-${incomingPhone}
-
-Этот входящий звонок связан с прошлым исходящим звонком.
-
-Связанная inbound call_session:
-${inbound?.id || "не создана"}
-
-Связанный прошлый outbound call_session:
-${relatedOutbound.id}
-
-Прошлая задача исходящего звонка:
-${relatedOutbound.instruction || "не указана"}
-
-Что это значит:
-— это не новый изолированный звонок;
-— воспринимай его как продолжение предыдущего контакта;
-— не начинай как оператор;
-— коротко поздоровайся;
-— если человек говорит по делу, продолжай контекст прошлого звонка;
-— если неясно, зачем человек перезвонил, коротко спроси: "Да, слушаю, что передать Юле?"
-— не говори технические слова, таблицы, session, базу, LiveKit или Supabase.
-`;
-  }
-
-  if (incomingPhone) {
-    return `
-Это входящий звонок.
-Человек сам позвонил Кузе.
-
-Номер входящего:
-${incomingPhone}
-
-Связанного прошлого исходящего звонка по этому номеру не найдено.
-
-Правила:
-— начни живо и коротко;
-— не веди себя как оператор;
-— если это Юля — говори по-человечески;
-— если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле;
-— не говори технические детали.
-`;
-  }
-
-  return `
-Это входящий звонок.
-Человек сам позвонил Кузе.
-Номер входящего не удалось определить из SIP headers.
-
-Начни живо и коротко.
-Если это Юля — не веди себя как оператор, держи контекст и говори по-человечески.
-Если это другой человек — коротко объясни, что ты Кузя и слушаешь, что передать Юле.
-`;
 }
+
+const inboundObservers = new Map();
 
 // ---------- OPENAI REALTIME SIP WEBHOOK ----------
 app.post("/openai-realtime-webhook", async (req, res) => {
@@ -4321,41 +4261,37 @@ app.post("/openai-realtime-webhook", async (req, res) => {
       console.error("REAL_INBOUND_LINK_ERROR:", e);
     }
 
-    const callContext = getRealtimeCallContext({
-      incomingPhone,
-      inboundLink
+    const history = await getRecentVoiceTurns(incomingPhone);
+    const matchedPending = matchingPendingCall(pendingRealtimeOutboundCall, incomingPhone)
+      ? { ...pendingRealtimeOutboundCall } : null;
+    const instructions = buildInboundInstructions({
+      core: KUZYA_CORE, pending: matchedPending, incomingPhone,
+      relatedOutbound: inboundLink?.relatedOutbound, history
+    });
+    console.log("KUZYA_INBOUND_CONTEXT", {
+      callId, historyTurns: history.length, matchedPending: Boolean(matchedPending),
+      hasPreviousTask: Boolean(inboundLink?.relatedOutbound?.instruction),
+      promptVersion: "inbound_dialogue_2026_10_26", model: REALTIME_MODEL
     });
 
     const acceptBody = {
       type: "realtime",
       model: REALTIME_MODEL,
-      instructions: `
-${KUZYA_CORE}
-
-СЕЙЧАС ТЫ РАБОТАЕШЬ В TELEPHONE REALTIME SIP-КОНТУРЕ.
-
-${callContext}
-
-Правила:
-— говори по-русски
-— отвечай быстро
-— отвечай коротко
-— не говори "чем могу помочь", если контекст понятен
-— если не расслышал — попроси повторить коротко
-— не объясняй технические детали без просьбы
-— стиль: живой, уверенный, тёплый, не канцелярский
-      `,
+      instructions,
       audio: {
         output: {
           voice: REALTIME_VOICE
         },
         input: {
           transcription: {
-            model: "gpt-4o-transcribe",
-            language: "ru"
+            model: "gpt-4o-transcribe"
           },
           turn_detection: {
-            type: "server_vad"
+            type: "server_vad",
+            silence_duration_ms: 800,
+            prefix_padding_ms: 300,
+            create_response: true,
+            interrupt_response: true
           },
           noise_reduction: {
             type: "near_field"
@@ -4389,8 +4325,34 @@ ${callContext}
 
     console.log("OpenAI realtime call accepted:", callId);
 
-    if (pendingRealtimeOutboundCall) {
+    if (matchedPending && pendingRealtimeOutboundCall?.createdAt === matchedPending.createdAt) {
       pendingRealtimeOutboundCall.callId = callId;
+    }
+
+    if (!inboundObservers.has(callId)) {
+      try {
+        const observer = observeRealtimeCall({
+          callId, apiKey: OPENAI_API_KEY,
+          onRecord: async record => {
+            const isUser = record.role === "user";
+            const saved = await sbLogKuziaInteraction({
+              channel: "inbound_call", direction: isUser ? "incoming" : record.role === "assistant" ? "outgoing" : "internal",
+              eventType: record.type, callSessionId: inboundLink?.inbound?.id || null,
+              normalizedPhone: normalizePhoneForMemory(incomingPhone),
+              stimulus: isUser ? record.text : "", response: record.role === "assistant" ? record.text : "",
+              summary: record.text ? `${isUser ? "Распознанная речь собеседника" : "Сгенерированная речь Кузи"}: ${record.text}` : record.type,
+              metadata: { ...record, text: undefined, openaiCallId: callId },
+              requestTimeoutMs: 5000
+            });
+            if (!saved) throw new Error("voice observation was not saved");
+          }
+        });
+        inboundObservers.set(callId, observer);
+        observer.socket.once("close", () => inboundObservers.delete(callId));
+      } catch (error) {
+        // Diagnostic failure must not reject or hang up an accepted phone call.
+        console.error("KUZYA_INBOUND_OBSERVER_START_FAILED", { callId, message: error.message });
+      }
     }
 
     return res.status(200).json({
