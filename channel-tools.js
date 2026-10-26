@@ -1,15 +1,16 @@
 import crypto from 'node:crypto';
+import { humanTelegramSender } from './owner-identity.js';
 import { OWNER_TELEGRAM_ID, formatContext } from './unified-context.js';
 
 // Existing workspace chat, verified from historical owner messages in Supabase.
 export const OWNER_WORKSPACE_CHAT_ID = '-1003870803501';
 export function isVoiceConnectionRequest(text) {
-  return /^(?:\/?voice(?:@\w+)?(?:\s+\d{4,8})?|личный\s+код\s+\d{4,8}|(?:дай|пришли|получи)\s+код(?:\s+для\s+звонка)?|(?:подключи|свяжи)\s+телефон)\s*[.!]?$/iu.test(String(text || '').trim());
+  return /^(?:\/?voice(?:@\w+)?(?:\s+\d{4,8})?|\/start\s+voice|личный\s+код\s+\d{4,8}|(?:дай|пришли|получи)\s+код(?:\s+для\s+звонка)?|(?:подключи(?:ть)?|свяжи)\s+телефон)\s*[.!]?$/iu.test(String(text || '').trim());
 }
-export function isOwnerTelegramMessage(message) {
-  if (String(message?.from?.id) !== OWNER_TELEGRAM_ID) return false;
+export function isOwnerTelegramMessage(message, verifiedOwnerId) {
+  if (!verifiedOwnerId || !humanTelegramSender(message) || String(message.from.id) !== String(verifiedOwnerId)) return false;
   const chat = message?.chat;
-  return (chat?.type === 'private' && String(chat.id) === OWNER_TELEGRAM_ID) ||
+  return (chat?.type === 'private' && String(chat.id) === String(verifiedOwnerId)) ||
     (['group', 'supergroup'].includes(chat?.type) && String(chat.id) === OWNER_WORKSPACE_CHAT_ID);
 }
 

@@ -111,17 +111,21 @@ test('Telegram delivery authentication cannot be forged by an owner ID in a JSON
   assert.equal(validWebhookSecret(secret, secret), true);
 });
 
-test('owner can use existing workspace and private chat, but other members and groups remain isolated', () => {
-  const message = { from: { id: OWNER_TELEGRAM_ID }, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'supergroup' } };
-  assert.equal(isOwnerTelegramMessage(message), true);
-  assert.equal(isOwnerTelegramMessage({ ...message, from: { id: 'other' } }), false);
-  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: '-1', type: 'supergroup' } }), false);
-  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_TELEGRAM_ID, type: 'private' } }), true);
-  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'channel' } }), false);
+test('only the bound human can use private and existing workspace chats', () => {
+  const owner = '987654321';
+  const message = { from: { id: owner, is_bot: false }, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'supergroup' } };
+  assert.equal(isOwnerTelegramMessage(message, owner), true);
+  assert.equal(isOwnerTelegramMessage(message), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, from: { id: '222', is_bot: false } }, owner), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: '-1', type: 'supergroup' } }, owner), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: owner, type: 'private' } }, owner), true);
+  assert.equal(isOwnerTelegramMessage({ ...message, sender_chat: { id: OWNER_WORKSPACE_CHAT_ID } }, owner), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, from: { id: OWNER_TELEGRAM_ID, is_bot: true } }, OWNER_TELEGRAM_ID), false);
+  assert.equal(isOwnerTelegramMessage({ ...message, from: { id: owner, is_bot: true } }, owner), false);
 });
 
 test('voice setup recognizes the actual user phrasing before it reaches a text model', () => {
-  for (const text of ['/voice', '/voice@kuzya_echo_bot', 'Voice 12345', 'Личный код 12345', 'подключи телефон', 'Пришли код для звонка']) assert.equal(isVoiceConnectionRequest(text), true, text);
+  for (const text of ['/voice', '/voice@kuzya_echo_bot', 'Voice 12345', 'Личный код 12345', 'подключи телефон', 'Подключить телефон', '/start voice', 'Пришли код для звонка']) assert.equal(isVoiceConnectionRequest(text), true, text);
   for (const text of ['Что значит voice?', 'Я читала про команду /voice', 'Позвони Гене', '12345']) assert.equal(isVoiceConnectionRequest(text), false, text);
 });
 
