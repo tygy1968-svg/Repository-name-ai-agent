@@ -3,6 +3,9 @@ import { OWNER_TELEGRAM_ID, formatContext } from './unified-context.js';
 
 // Existing workspace chat, verified from historical owner messages in Supabase.
 export const OWNER_WORKSPACE_CHAT_ID = '-1003870803501';
+export function isVoiceConnectionRequest(text) {
+  return /^(?:\/?voice(?:@\w+)?(?:\s+\d{4,8})?|личный\s+код\s+\d{4,8}|(?:дай|пришли|получи)\s+код(?:\s+для\s+звонка)?|(?:подключи|свяжи)\s+телефон)\s*[.!]?$/iu.test(String(text || '').trim());
+}
 export function isOwnerTelegramMessage(message) {
   if (String(message?.from?.id) !== OWNER_TELEGRAM_ID) return false;
   const chat = message?.chat;
@@ -60,21 +63,25 @@ export async function searchInternet(query, { apiKey, fetchImpl = fetch } = {}) 
 export function createVoiceToolHandler({ callId, access, store, search, onResult = async () => {} }) {
   let count = 0;
   return async (name, args) => {
-    if (++count > 40) return { ok: false, error: 'call_tool_limit' };
+    const finish = async result => {
+      try { await onResult({ name, ok: result.ok, error: result.error || null, checkedAt: new Date().toISOString(), sources: result.results?.map(r => r.url) || [] }); }
+      catch { /* Audit failure must not invent a failure of a successful read. */ }
+      return result;
+    };
+    if (++count > 40) return finish({ ok: false, error: 'call_tool_limit' });
     let result;
     if (name === 'authenticate_owner') {
-      if (!access.verify(callId, args.code)) return { ok: false, error: 'authentication_failed', instruction: 'Нужен свежий код /voice из личного Telegram Кузи.' };
+      if (!access.has(callId) && !access.verify(callId, args.code)) return finish({ ok: false, error: 'authentication_failed', instruction: 'Нужен именно шестизначный код, созданный ботом после /voice или «подключи телефон». Пользовательский номер/личный PIN не является этим кодом. Telegram подключён; личная память ещё не открыта.' });
       result = { ok: true, authenticated: true, context: await store.load({ userId: OWNER_TELEGRAM_ID }) };
     } else if (name === 'read_shared_context') {
-      if (!access.has(callId)) return { ok: false, error: 'owner_authentication_required', instruction: 'Для личной памяти Юля должна отправить /voice в Telegram Кузе и назвать полученный код.' };
+      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required', instruction: 'Telegram подключён. Для личной памяти Юля должна отправить «подключи телефон» в Telegram Кузе и назвать полученный код.' });
       const context = await store.load({ userId: OWNER_TELEGRAM_ID, query: String(args.query || '').slice(0, 500) });
       result = { ok: true, context: formatContext(context) };
     } else if (name === 'search_internet') {
-      if (!access.has(callId)) return { ok: false, error: 'owner_authentication_required' };
+      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
       result = await search(args.query);
-    } else return { ok: false, error: 'unknown_tool' };
-    await onResult({ name, ok: result.ok, checkedAt: new Date().toISOString(), sources: result.results?.map(r => r.url) || [] });
-    return result;
+    } else return finish({ ok: false, error: 'unknown_tool' });
+    return finish(result);
   };
 }
 

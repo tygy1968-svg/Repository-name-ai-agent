@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { OWNER_TELEGRAM_ID, createContextStore, selectMemories } from '../unified-context.js';
-import { isOwnerTelegramMessage, OWNER_WORKSPACE_CHAT_ID, createVoiceAccess, createVoiceToolHandler, attachRealtimeTools, searchInternet, webhookSecret, validWebhookSecret } from '../channel-tools.js';
+import { OWNER_TELEGRAM_ID, createContextStore, selectMemories, channelCapabilities, falseCapabilityDenial } from '../unified-context.js';
+import { isVoiceConnectionRequest, isOwnerTelegramMessage, OWNER_WORKSPACE_CHAT_ID, createVoiceAccess, createVoiceToolHandler, attachRealtimeTools, searchInternet, webhookSecret, validWebhookSecret } from '../channel-tools.js';
 
 test('shared context works without embeddings, excludes refutations and model claims, isolates users', async () => {
   let reads = 0;
@@ -118,4 +118,26 @@ test('owner can use existing workspace and private chat, but other members and g
   assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: '-1', type: 'supergroup' } }), false);
   assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_TELEGRAM_ID, type: 'private' } }), true);
   assert.equal(isOwnerTelegramMessage({ ...message, chat: { id: OWNER_WORKSPACE_CHAT_ID, type: 'channel' } }), false);
+});
+
+test('voice setup recognizes the actual user phrasing before it reaches a text model', () => {
+  for (const text of ['/voice', '/voice@kuzya_echo_bot', 'Voice 12345', 'Личный код 12345', 'подключи телефон', 'Пришли код для звонка']) assert.equal(isVoiceConnectionRequest(text), true, text);
+  for (const text of ['Что значит voice?', 'Я читала про команду /voice', 'Позвони Гене', '12345']) assert.equal(isVoiceConnectionRequest(text), false, text);
+});
+
+test('capability facts distinguish an enabled phone from authorization and channel limitations', () => {
+  assert.match(channelCapabilities('Telegram', true), /Входящие телефонные звонки ПОДКЛЮЧЕНЫ/);
+  assert.match(channelCapabilities('phone', false), /Telegram ПОДКЛЮЧЁН/);
+  assert.equal(falseCapabilityDenial('Я не могу принимать входящие звонки.'), true);
+  assert.equal(falseCapabilityDenial('Я не умею звонить.'), true);
+  assert.equal(falseCapabilityDenial('Я пока не могу звонить без подтверждения.'), false);
+  assert.equal(falseCapabilityDenial('Личная память в этом звонке пока закрыта.'), false);
+});
+
+test('failed authentication is auditable without recording the supplied code', async () => {
+  const audit = [];
+  const handler = createVoiceToolHandler({ callId: 'test', access: createVoiceAccess(), store: {}, onResult: async row => audit.push(row) });
+  assert.equal((await handler('authenticate_owner', { code: '12345' })).error, 'authentication_failed');
+  assert.equal(audit[0].error, 'authentication_failed');
+  assert.doesNotMatch(JSON.stringify(audit), /12345/);
 });

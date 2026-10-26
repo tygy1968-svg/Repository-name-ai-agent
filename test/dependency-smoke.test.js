@@ -285,10 +285,31 @@ for (const privateAvailable of [true, false]) {
     if (!server.listening) await once(server, 'listening');
     const result = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': webhookSecret('test-only') },
-      body: JSON.stringify({ message: { from: { id: 1087968824 }, chat: { id: -1003870803501, type: 'supergroup' }, text: '/voice' } })
+      body: JSON.stringify({ message: { from: { id: 1087968824 }, chat: { id: -1003870803501, type: 'supergroup' }, text: privateAvailable ? 'Voice 12345' : 'подключи телефон' } })
     });
     assert.equal(result.status, 200);
     await Promise.race([delivered, new Promise((_,reject) => { const timer = setTimeout(() => reject(new Error('delivery timeout')), 2000); timer.unref(); })]);
     assert.equal(sent.length, 2);
   });
 }
+
+
+test('actual Telegram reply repairs categorical denial of its connected telephone', async () => {
+  const express = (await import('express')).default;
+  const wrapper = Object.assign(function () { const app = express(); app.listen = () => ({}); return app; }, express);
+  let repaired = false;
+  const app = await loadApplication('server.js', { express: { default: wrapper } }, {
+    PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
+  }, { exports: ['generateReply'], fetch: async (url, options) => {
+    if (url.startsWith('https://database.invalid/')) return Response.json([]);
+    assert.equal(url, 'https://api.openai.com/v1/chat/completions');
+    const messages = JSON.parse(options.body).messages;
+    if (!messages[0].content.includes('ПРОВЕРЕННАЯ КОНФИГУРАЦИЯ')) return Response.json({ choices: [{ message: { content: '{"needs_web":false}' } }] });
+    const repair = messages.some(m => m.content.includes('Предыдущий черновик ошибочно отрицал'));
+    if (repair) repaired = true;
+    return Response.json({ choices: [{ message: { content: repair ? 'Да, звони. Общая память доступна после подключения через Telegram.' : 'Я не могу принимать входящие звонки.' } }] });
+  } });
+  const reply = await app.exports.generateReply('1087968824', 'Я тебе позвоню сейчас', []);
+  assert.equal(repaired, true);
+  assert.match(reply, /Да, звони/);
+});
