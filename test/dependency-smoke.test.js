@@ -6,6 +6,8 @@ import { once, EventEmitter } from 'node:events';
 import * as agents from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import { webhookSecret } from '../channel-tools.js';
+import { createOwnerIdentity } from '../owner-identity.js';
+import crypto from 'node:crypto';
 
 // Evaluate the actual application with fake credentials and outbound fetch blocked.
 // LiveKit connection startup is intercepted before any room or call is created.
@@ -236,6 +238,7 @@ test('actual Telegram route rejects spoofing and issues pairing code only in own
   const app = await loadApplication('server.js', { express: { default: wrapper } }, {
     PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
   }, { fetch: async (url, options) => {
+    if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
     assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
     assert.match(JSON.parse(options.body).text, /Код для общей памяти/);
     return Response.json({ ok: true });
@@ -243,13 +246,13 @@ test('actual Telegram route rejects spoofing and issues pairing code only in own
   t.after(() => new Promise(resolve => server.close(resolve)));
   if (!server.listening) await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
-  const message = { from: { id: 1087968824 }, chat: { id: 1087968824, type: 'private' }, text: '/voice' };
+  const message = { from: { id: 987654321, is_bot: false }, chat: { id: 987654321, type: 'private' }, text: '/voice' };
   const post = (message, secret) => fetch(base + '/webhook', { method: 'POST', headers: { 'content-type': 'application/json', ...(secret ? { 'X-Telegram-Bot-Api-Secret-Token': secret } : {}) }, body: JSON.stringify({ message }) });
   assert.equal((await post(message)).status, 403); assert.equal(app.outbound.length, 0);
   await post({ ...message, chat: { id: -1, type: 'group' } }, webhookSecret('test-only'));
-  assert.equal(app.outbound.length, 0);
+  assert.equal(app.outbound.filter(x => x.url.endsWith('/sendMessage')).length, 0);
   assert.equal((await post(message, webhookSecret('test-only'))).status, 200);
-  assert.equal(app.outbound.length, 1);
+  assert.equal(app.outbound.filter(x => x.url.endsWith('/sendMessage')).length, 1);
   assert.equal((await fetch(base + '/internal/voice-tool', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 403);
 });
 
@@ -268,10 +271,11 @@ for (const privateAvailable of [true, false]) {
     await loadApplication('server.js', { express: { default: wrapper } }, {
       PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
     }, { fetch: async (url, options) => {
+    if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
       if (url.endsWith('/getMe')) return Response.json({ ok: true, result: { username: 'TestKuzyaBot' } });
       assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
       const body = JSON.parse(options.body); sent.push(body);
-      if (String(body.chat_id) === '1087968824') {
+      if (String(body.chat_id) === '987654321') {
         assert.match(body.text, /Код для общей памяти/);
         return privateAvailable ? Response.json({ ok: true }) : Response.json({ ok: false, error_code: 403 }, { status: 403 });
       }
@@ -285,7 +289,7 @@ for (const privateAvailable of [true, false]) {
     if (!server.listening) await once(server, 'listening');
     const result = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': webhookSecret('test-only') },
-      body: JSON.stringify({ message: { from: { id: 1087968824 }, chat: { id: -1003870803501, type: 'supergroup' }, text: privateAvailable ? 'Voice 12345' : 'подключи телефон' } })
+      body: JSON.stringify({ message: { from: { id: 987654321, is_bot: false }, chat: { id: -1003870803501, type: 'supergroup' }, text: privateAvailable ? 'Voice 12345' : 'подключи телефон' } })
     });
     assert.equal(result.status, 200);
     await Promise.race([delivered, new Promise((_,reject) => { const timer = setTimeout(() => reject(new Error('delivery timeout')), 2000); timer.unref(); })]);
@@ -293,6 +297,43 @@ for (const privateAvailable of [true, false]) {
   });
 }
 
+
+test('actual HTTP enrollment persists identity and delivers a code to the real private sender', async (t) => {
+  const express = (await import('express')).default;
+  let server, row, delivered;
+  const sent = [];
+  const done = new Promise(resolve => { delivered = resolve; });
+  const token = 'bind_' + 'a'.repeat(32);
+  const wrapper = Object.assign(function () { const app = express(), listen = app.listen.bind(app);
+    app.listen = (...args) => { server = listen(...args); return server; }; return app; }, express);
+  await loadApplication('server.js', { express: { default: wrapper }, './owner-identity.js': {
+    ...(await import('../owner-identity.js')),
+    createOwnerIdentity: options => createOwnerIdentity({ ...options,
+      tokenHash: crypto.createHash('sha256').update(token).digest('hex'), expiresAt: new Date(Date.now() + 60000).toISOString() })
+  } }, { PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake' }, {
+    fetch: async (url, options) => {
+      if (url.includes('/rest/v1/agent_state')) {
+        if (options.method === 'POST') { row = JSON.parse(options.body); return new Response('', { status: 201 }); }
+        return Response.json(row ? [row] : []);
+      }
+      assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
+      const body = JSON.parse(options.body); sent.push(body);
+      assert.equal(body.chat_id, '987654321');
+      assert.match(body.text, /Твой личный Telegram подключён/);
+      assert.match(body.text, /\b\d{6}\b/);
+      delivered(); return Response.json({ ok: true });
+    }
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  if (!server.listening) await once(server, 'listening');
+  const result = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': webhookSecret('test-only') },
+    body: JSON.stringify({ message: { from: { id: 987654321, is_bot: false }, chat: { id: 987654321, type: 'private' }, text: '/start ' + token } })
+  });
+  assert.equal(result.status, 200); await done;
+  assert.equal(sent.length, 1);
+  assert.equal(JSON.parse(row.summary).telegramUserId, '987654321');
+});
 
 test('actual Telegram reply repairs categorical denial of its connected telephone', async () => {
   const express = (await import('express')).default;

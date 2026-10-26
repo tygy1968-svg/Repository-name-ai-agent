@@ -3,6 +3,7 @@ import { isVoiceConnectionRequest, isOwnerTelegramMessage, webhookSecret, validW
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
+import { createOwnerIdentity, humanTelegramSender } from "./owner-identity.js";
 import { SipClient, AgentDispatchClient } from "livekit-server-sdk";
 
 const app = express();
@@ -44,6 +45,7 @@ const SUPABASE_CHAT_ARCHIVE_ANCHORS_URL = `${SUPABASE_URL}/rest/v1/chat_archive_
 const KUZYA_CORE = CONTINUITY_RULES;
 const sharedStore = createContextStore({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const voiceAccess = createVoiceAccess();
+const ownerIdentity = createOwnerIdentity({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const telegramWebhookSecret = webhookSecret(TELEGRAM_TOKEN);
 const internalToolSecret = webhookSecret(SUPABASE_KEY);
 const searchConnectedInternet = query => searchInternet(query, { apiKey: process.env.SERP_API_KEY, fetchImpl: (...args) => fetch(...args) });
@@ -69,7 +71,8 @@ async function tgSendMessage(chatId, text) {
   });
   const result = await response.json();
   if (!response.ok || !result.ok) {
-    console.error("KUZYA_TELEGRAM_SEND_FAILED", { status: response.status, code: result.error_code });
+    console.error("KUZYA_TELEGRAM_SEND_FAILED", { status: response.status, code: result.error_code,
+      reason: /chat not found/i.test(result.description || '') ? 'chat_not_found' : /blocked/i.test(result.description || '') ? 'bot_blocked' : 'other' });
     throw new Error(`Telegram send failed: ${result.error_code || response.status}`);
   }
   return result.result;
@@ -2515,7 +2518,7 @@ ${intent.instruction}
 }
 
 // ---------- GENERATE REPLY ----------
-async function generateReply(userId, userText, memory) {
+async function generateReply(userId, userText, memory, chatType = 'unknown') {
   const packet = await sharedStore.load({ userId, query: userText });
   const history = dialogHistory[userId] || [];
   let web = { ok: false, error: "not_requested" };
@@ -2526,6 +2529,7 @@ async function generateReply(userId, userText, memory) {
   const messages = [{ role: "system", content: `${CONTINUITY_RULES}
 ${channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY))}
 Сейчас канал Telegram. Подтверждены отправитель Юля и разрешённый чат Telegram.
+Тип текущего чата: ${chatType}. Только private — личная переписка; group/supergroup — группа. Не называй группу личным чатом.
 Ты видишь сохранённые сообщения этого бота, а не весь аккаунт Telegram или чаты ChatGPT.
 Исходящие звонки запускает обработчик явных команд Telegram, не твой текстовый ответ. Если звонок ещё не запущен, не говори «звоню».
 Интернет: ${JSON.stringify(web)}. Только успешные результаты являются проверкой. Приводи ссылки, когда используешь найденное.
@@ -2852,23 +2856,37 @@ app.post("/webhook", async (req, res) => {
     console.error("KUZYA_TELEGRAM_DELIVERY_REJECTED");
     return res.sendStatus(403);
   }
-  const accepted = isOwnerTelegramMessage(msg);
+  let verifiedOwnerId;
+  let enrolled = false;
+  const enrollment = /^\/start\s+(bind_[A-Za-z0-9_-]{32})$/.exec(String(msg.text || '').trim());
+  try {
+    if (enrollment) enrolled = await ownerIdentity.enroll(msg, enrollment[1]);
+    if (humanTelegramSender(msg)) verifiedOwnerId = await ownerIdentity.load();
+  } catch {
+    console.error("KUZYA_OWNER_BINDING_UNAVAILABLE");
+    return res.sendStatus(503); // Telegram retries; no silent loss or memory access.
+  }
+  const accepted = isOwnerTelegramMessage(msg, verifiedOwnerId);
   console.log("KUZYA_TELEGRAM_UPDATE", { accepted, chatType: msg.chat?.type, messageId: msg.message_id });
   if (!accepted) return res.sendStatus(200);
+  if (enrollment && !enrolled) return res.sendStatus(200); // Never pass a link token to the LLM/history.
 
   // отвечаем Telegram сразу
   res.sendStatus(200);
 
   (async () => {
     const { id: chatId } = msg.chat;
-    const { id: userId } = msg.from;
+    // Historical storage namespace is retained; it is NOT an authenticated
+    // Telegram identity (1087968824 is the anonymous group service sender).
+    const userId = OWNER_TELEGRAM_ID;
 
     try {
-      if (isVoiceConnectionRequest(msg.text)) {
+      if (enrolled || isVoiceConnectionRequest(msg.text)) {
         const code = voiceAccess.issue(userId);
         // Always deliver the access code privately, even if requested in the workspace.
         try {
-          await tgSendMessage(OWNER_TELEGRAM_ID, `Код для общей памяти в звонке: ${code}. Это одноразовый код, созданный мной; не нужно придумывать свой. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
+          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}Код для общей памяти в звонке: ${code}. Это одноразовый код, созданный мной; не нужно придумывать свой. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
+          console.log("KUZYA_VOICE_CODE_DELIVERED", { enrolled, messageId: msg.message_id });
         } catch (error) {
           if (msg.chat.type === "private") throw error;
           let botLink = "";
@@ -3376,7 +3394,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       const memory = await sbGetMemory(userId);
-      const reply = await generateReply(userId, text, memory);
+      const reply = await generateReply(userId, text, memory, msg.chat.type);
 
       await tgSendMessage(chatId, reply);
 
@@ -4157,6 +4175,8 @@ app.listen(PORT, () => {
       catch { console.error("KUZYA_TELEGRAM_SETUP_RETRY"); const timer = setTimeout(setup, 15000); timer.unref?.(); }
     };
     setup();
+    ownerIdentity.load().then(id => console.log("KUZYA_OWNER_BINDING_CHECK", { configured: Boolean(id) }))
+      .catch(() => console.error("KUZYA_OWNER_BINDING_UNAVAILABLE"));
     checkModelCapabilities();
     sharedStore.load({ userId: OWNER_TELEGRAM_ID }).then(packet => console.log("KUZYA_SHARED_CONTEXT_CHECK", {
       access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable
