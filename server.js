@@ -1,5 +1,5 @@
 import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, createContextStore, formatContext } from "./unified-context.js";
-import { webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
+import { isOwnerTelegramMessage, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
@@ -61,11 +61,18 @@ const dialogState = {};
 
 // ---------- TELEGRAM ----------
 async function tgSendMessage(chatId, text) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
+  const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
+    signal: AbortSignal.timeout(7000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
   });
+  const result = await response.json();
+  if (!response.ok || !result.ok) {
+    console.error("KUZYA_TELEGRAM_SEND_FAILED", { status: response.status, code: result.error_code });
+    throw new Error(`Telegram send failed: ${result.error_code || response.status}`);
+  }
+  return result.result;
 }
 
 // ---------- SUPABASE ----------
@@ -2516,7 +2523,7 @@ async function generateReply(userId, userText, memory) {
     if (plan.needs_web) web = await searchConnectedInternet(userText);
   } catch { web = { ok: false, error: "search_planning_unavailable" }; }
   const messages = [{ role: "system", content: `${CONTINUITY_RULES}
-Сейчас канал Telegram. Собеседница подтверждена личным Telegram.
+Сейчас канал Telegram. Подтверждены отправитель Юля и разрешённый чат Telegram.
 Ты видишь сохранённые сообщения этого бота, а не весь аккаунт Telegram или чаты ChatGPT.
 Исходящие звонки запускает обработчик явных команд Telegram, не твой текстовый ответ. Если звонок ещё не запущен, не говори «звоню».
 Интернет: ${JSON.stringify(web)}. Только успешные результаты являются проверкой. Приводи ссылки, когда используешь найденное.
@@ -2834,8 +2841,13 @@ app.post("/webhook", async (req, res) => {
   const msg = req.body.message;
 
   if (!msg) return res.sendStatus(200);
-  if (!validWebhookSecret(req.get("X-Telegram-Bot-Api-Secret-Token"), telegramWebhookSecret)) return res.sendStatus(403);
-  if (String(msg.from?.id) !== OWNER_TELEGRAM_ID || String(msg.chat?.id) !== OWNER_TELEGRAM_ID || msg.chat?.type !== "private") return res.sendStatus(200);
+  if (!validWebhookSecret(req.get("X-Telegram-Bot-Api-Secret-Token"), telegramWebhookSecret)) {
+    console.error("KUZYA_TELEGRAM_DELIVERY_REJECTED");
+    return res.sendStatus(403);
+  }
+  const accepted = isOwnerTelegramMessage(msg);
+  console.log("KUZYA_TELEGRAM_UPDATE", { accepted, chatType: msg.chat?.type, messageId: msg.message_id });
+  if (!accepted) return res.sendStatus(200);
 
   // отвечаем Telegram сразу
   res.sendStatus(200);
@@ -2847,7 +2859,21 @@ app.post("/webhook", async (req, res) => {
     try {
       if (/^\/voice(?:@\w+)?\s*$/i.test(msg.text || "")) {
         const code = voiceAccess.issue(userId);
-        await tgSendMessage(chatId, `Код для общей памяти в звонке: ${code}. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
+        // Always deliver the access code privately, even if requested in the workspace.
+        try {
+          await tgSendMessage(OWNER_TELEGRAM_ID, `Код для общей памяти в звонке: ${code}. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
+        } catch (error) {
+          if (msg.chat.type === "private") throw error;
+          let botLink = "";
+          try {
+            const response = await fetch(`${TELEGRAM_API}/getMe`, { signal: AbortSignal.timeout(5000) });
+            const bot = await response.json();
+            if (response.ok && bot.ok && /^[A-Za-z0-9_]+$/.test(bot.result?.username || "")) botLink = ` https://t.me/${bot.result.username}?start=voice`;
+          } catch { /* The fallback still explains how to open the private chat. */ }
+          await tgSendMessage(chatId, `Не получилось отправить код в личку. Открой мой профиль в Telegram, нажми «Начать» и отправь /voice в личном чате.${botLink}`);
+          return;
+        }
+        if (msg.chat.type !== "private") await tgSendMessage(chatId, "Код отправлен тебе в личный чат со мной. Он действует 5 минут.");
         return;
       }
       // PHOTO
@@ -3375,7 +3401,8 @@ app.post("/webhook", async (req, res) => {
       });
     } catch (e) {
       console.error("handler error", e);
-      await tgSendMessage(chatId, "Техническая ошибка. Попробуйте позже.");
+      try { await tgSendMessage(chatId, "Не получилось обработать сообщение из-за технической ошибки."); }
+      catch { console.error("KUZYA_TELEGRAM_ERROR_REPLY_FAILED"); }
     }
   })();
 });
@@ -4085,6 +4112,12 @@ async function secureTelegramWebhook() {
   const info = await infoResponse.json();
   if (!infoResponse.ok || !info.ok || !info.result?.url) throw new Error("Existing Telegram webhook unavailable");
   if (process.env.RENDER_EXTERNAL_URL && new URL(info.result.url).origin !== new URL(process.env.RENDER_EXTERNAL_URL).origin) throw new Error("Telegram destination differs from this service");
+  console.log("KUZYA_TELEGRAM_DELIVERY_STATE", { pending: info.result.pending_update_count, pathMatches: new URL(info.result.url).pathname === "/webhook", lastErrorAt: info.result.last_error_date || null });
+  try {
+    const botResponse = await fetch(`${TELEGRAM_API}/getMe`, { signal: AbortSignal.timeout(5000) });
+    const bot = await botResponse.json();
+    if (botResponse.ok && bot.ok) console.log("KUZYA_TELEGRAM_BOT", { username: bot.result.username });
+  } catch { console.error("KUZYA_TELEGRAM_BOT_INFO_UNAVAILABLE"); }
   // Preserve the already configured destination, update delivery authentication only.
   const response = await fetch(`${TELEGRAM_API}/setWebhook`, { method: "POST", headers: { "Content-Type": "application/json" },
     signal: AbortSignal.timeout(5000), body: JSON.stringify({ url: info.result.url, secret_token: telegramWebhookSecret,
