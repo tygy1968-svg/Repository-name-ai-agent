@@ -2,6 +2,9 @@
   "name": "ai-agent",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": "24.22.1"
+  },
   "scripts": {
     "start": "node agent.js start & node server.js"
   },
