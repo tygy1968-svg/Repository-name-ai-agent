@@ -1,4 +1,4 @@
-import { CONTINUITY_RULES } from "./unified-context.js";
+import { CONTINUITY_RULES, channelCapabilities } from "./unified-context.js";
 import { webhookSecret } from "./channel-tools.js";
 import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
@@ -691,7 +691,7 @@ export default defineAgent({
 
     const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
 
-    const runtimeInstructions = CONTINUITY_RULES + "\n" + buildCallInstructions(metadata, {
+    const runtimeInstructions = CONTINUITY_RULES + "\n" + channelCapabilities("исходящий телефон", Boolean(process.env.SERP_API_KEY)) + "\n" + buildCallInstructions(metadata, {
       agentStateSummary,
       callSession,
       recentInteractionsText,

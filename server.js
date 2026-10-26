@@ -1,5 +1,5 @@
-import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, createContextStore, formatContext } from "./unified-context.js";
-import { isOwnerTelegramMessage, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
+import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, falseCapabilityDenial, createContextStore, formatContext } from "./unified-context.js";
+import { isVoiceConnectionRequest, isOwnerTelegramMessage, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
@@ -1842,6 +1842,7 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   const res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(20000),
     body: JSON.stringify({ model: CHAT_MODEL, temperature, max_tokens, messages })
   });
 
@@ -2523,6 +2524,7 @@ async function generateReply(userId, userText, memory) {
     if (plan.needs_web) web = await searchConnectedInternet(userText);
   } catch { web = { ok: false, error: "search_planning_unavailable" }; }
   const messages = [{ role: "system", content: `${CONTINUITY_RULES}
+${channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY))}
 Сейчас канал Telegram. Подтверждены отправитель Юля и разрешённый чат Telegram.
 Ты видишь сохранённые сообщения этого бота, а не весь аккаунт Telegram или чаты ChatGPT.
 Исходящие звонки запускает обработчик явных команд Telegram, не твой текстовый ответ. Если звонок ещё не запущен, не говори «звоню».
@@ -2530,7 +2532,12 @@ async function generateReply(userId, userText, memory) {
 ${formatContext(packet)}
 Предыдущие ответы в диалоге — история твоих слов, а не подтверждение фактов. Если противоречат источникам, исправь себя.` },
     ...history.slice(-20), { role: "user", content: userText }];
-  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 700 });
+  let reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 700 });
+  if (falseCapabilityDenial(reply)) {
+    console.error("KUZYA_CAPABILITY_REPLY_REPAIR");
+    reply = await openaiChat([...messages, { role: "system", content: "Предыдущий черновик ошибочно отрицал подключённые возможности. Ответь заново по ПРОВЕРЕННОЙ КОНФИГУРАЦИИ: у тебя реально есть входящий телефон и Telegram. Не выдавай ограничение одного канала за отсутствие возможности всего приложения." }], { temperature: 0, max_tokens: 700 });
+    if (falseCapabilityDenial(reply)) reply = "Юль, у меня подключены и телефон, и Telegram. Для общей памяти в звонке напиши здесь «подключи телефон»: я пришлю в личку одноразовый код. Назови его мне по телефону, и я смогу прочитать сохранённую переписку.";
+  }
   dialogHistory[userId] = [...history, { role: "user", content: userText }, { role: "assistant", content: reply }].slice(-30);
   return reply;
 }
@@ -2857,11 +2864,11 @@ app.post("/webhook", async (req, res) => {
     const { id: userId } = msg.from;
 
     try {
-      if (/^\/voice(?:@\w+)?\s*$/i.test(msg.text || "")) {
+      if (isVoiceConnectionRequest(msg.text)) {
         const code = voiceAccess.issue(userId);
         // Always deliver the access code privately, even if requested in the workspace.
         try {
-          await tgSendMessage(OWNER_TELEGRAM_ID, `Код для общей памяти в звонке: ${code}. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
+          await tgSendMessage(OWNER_TELEGRAM_ID, `Код для общей памяти в звонке: ${code}. Это одноразовый код, созданный мной; не нужно придумывать свой. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
         } catch (error) {
           if (msg.chat.type === "private") throw error;
           let botLink = "";
@@ -3976,13 +3983,13 @@ app.post("/openai-realtime-webhook", async (req, res) => {
     const matchedPending = matchingPendingCall(pendingRealtimeOutboundCall, incomingPhone)
       ? { ...pendingRealtimeOutboundCall } : null;
     const instructions = buildInboundInstructions({
-      core: KUZYA_CORE, pending: matchedPending, incomingPhone,
+      core: KUZYA_CORE + "\n" + channelCapabilities("входящий телефон", Boolean(process.env.SERP_API_KEY)), pending: matchedPending, incomingPhone,
       relatedOutbound: null, history
     });
     console.log("KUZYA_INBOUND_CONTEXT", {
       callId, historyTurns: history.length, matchedPending: Boolean(matchedPending),
       hasPreviousTask: Boolean(inboundLink?.relatedOutbound?.instruction),
-      promptVersion: "shared_context_2026_10_27", model: REALTIME_MODEL
+      promptVersion: "channel_capabilities_2026_10_27", model: REALTIME_MODEL
     });
 
     const acceptBody = {
@@ -4087,7 +4094,7 @@ app.post("/openai-realtime-webhook", async (req, res) => {
 function makeVoiceTools(callId) {
   return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet,
     onResult: async result => {
-      console.log("KUZYA_VOICE_TOOL_RESULT", { callId, name: result.name, ok: result.ok });
+      console.log("KUZYA_VOICE_TOOL_RESULT", { callId, name: result.name, ok: result.ok, error: result.error });
       await sbLogKuziaInteraction({ userId: OWNER_ID, channel: "voice_tool", direction: "internal", eventType: "tool_result",
         summary: `${result.name}: ${result.ok ? "success" : "failed"}`, metadata: { ...result, openaiCallId: callId, ownerAuthenticated: voiceAccess.has(callId) }, requestTimeoutMs: 5000 });
     } });
@@ -4128,6 +4135,19 @@ async function secureTelegramWebhook() {
   console.log("KUZYA_TELEGRAM_WEBHOOK_SECURED");
 }
 
+// Bounded startup diagnostics use public configuration and synthetic questions only.
+// They send no Telegram messages, start no calls and do not alter conversation memory.
+async function checkModelCapabilities() {
+  const system = CONTINUITY_RULES + "\n" + channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY));
+  for (const [id, question] of [["incoming", "Я тебе позвоню сейчас и скажи мне номер, который я прислала в Telegram."], ["channels", "Ты в телефоне и в Telegram — разные помощники? Можешь ли принимать звонки?"]]) {
+    try {
+      const answer = await openaiChat([{ role: "system", content: system }, { role: "user", content: question }], { temperature: 0, max_tokens: 220 });
+      const passed = !falseCapabilityDenial(answer) && /звон|телефон/i.test(answer) && /telegram|телеграм/i.test(answer);
+      console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id, passed, answer });
+    } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id }); }
+  }
+}
+
 // ---------- START ----------
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
@@ -4137,6 +4157,7 @@ app.listen(PORT, () => {
       catch { console.error("KUZYA_TELEGRAM_SETUP_RETRY"); const timer = setTimeout(setup, 15000); timer.unref?.(); }
     };
     setup();
+    checkModelCapabilities();
     sharedStore.load({ userId: OWNER_TELEGRAM_ID }).then(packet => console.log("KUZYA_SHARED_CONTEXT_CHECK", {
       access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable
     })).catch(() => console.error("KUZYA_SHARED_CONTEXT_CHECK_FAILED"));
