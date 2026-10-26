@@ -5,6 +5,7 @@ import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
 import { once, EventEmitter } from 'node:events';
 import * as agents from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
+import { webhookSecret } from '../channel-tools.js';
 
 // Evaluate the actual application with fake credentials and outbound fetch blocked.
 // LiveKit connection startup is intercepted before any room or call is created.
@@ -70,6 +71,11 @@ test('real agent creates its voice session and serializable endCall tool', async
   assert.ok(startedAgent instanceof agents.voice.Agent);
   const tool = startedAgent.toolCtx.getFunctionTool('endCall');
   assert.ok(tool, 'endCall remains registered after the LiveKit upgrade');
+  for (const name of ['authenticateOwner', 'readSharedContext', 'searchInternet']) {
+    const connected = startedAgent.toolCtx.getFunctionTool(name);
+    assert.ok(connected, name + ' is connected to the actual voice agent');
+    assert.equal(agents.llm.toJsonSchema(connected.parameters).type, 'object');
+  }
   const schema = agents.llm.toJsonSchema(tool.parameters);
   assert.equal(schema.type, 'object');
   assert.equal(schema.properties.reason.type, 'string');
@@ -206,7 +212,8 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   });
   assert.equal((await result.json()).accepted, true);
   assert.equal(accepted.model, 'gpt-realtime');
-  assert.match(accepted.instructions, /Поговорим о магазине/);
+  assert.doesNotMatch(accepted.instructions, /Поговорим о магазине/);
+  assert.deepEqual(accepted.tools.map(t => t.name), ["authenticate_owner", "read_shared_context", "search_internet"]);
   assert.match(accepted.instructions, /Это входящий звонок/);
   assert.equal(accepted.audio.input.turn_detection.silence_duration_ms, 800);
   assert.equal(accepted.audio.input.transcription.language, undefined);
@@ -216,4 +223,32 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   assert.equal(saved.call_session_id, 'new-call');
   assert.equal(saved.normalized_phone, '380670000001');
   assert.equal(saved.stimulus, 'Тестовая реплика.');
+  assert.equal(saved.metadata.ownerAuthenticated, false);
+});
+
+test('actual Telegram route rejects spoofing and issues pairing code only in owner private chat', async (t) => {
+  const express = (await import('express')).default;
+  let server;
+  const wrapper = Object.assign(function () {
+    const app = express(), listen = app.listen.bind(app);
+    app.listen = (...args) => { server = listen(...args); return server; }; return app;
+  }, express);
+  const app = await loadApplication('server.js', { express: { default: wrapper } }, {
+    PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
+  }, { fetch: async (url, options) => {
+    assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
+    assert.match(JSON.parse(options.body).text, /Код для общей памяти/);
+    return Response.json({ ok: true });
+  } });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  if (!server.listening) await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const message = { from: { id: 1087968824 }, chat: { id: 1087968824, type: 'private' }, text: '/voice' };
+  const post = (message, secret) => fetch(base + '/webhook', { method: 'POST', headers: { 'content-type': 'application/json', ...(secret ? { 'X-Telegram-Bot-Api-Secret-Token': secret } : {}) }, body: JSON.stringify({ message }) });
+  assert.equal((await post(message)).status, 403); assert.equal(app.outbound.length, 0);
+  await post({ ...message, chat: { id: -1, type: 'group' } }, webhookSecret('test-only'));
+  assert.equal(app.outbound.length, 0);
+  assert.equal((await post(message, webhookSecret('test-only'))).status, 200);
+  assert.equal(app.outbound.length, 1);
+  assert.equal((await fetch(base + '/internal/voice-tool', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 403);
 });

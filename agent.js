@@ -1,3 +1,5 @@
+import { CONTINUITY_RULES } from "./unified-context.js";
+import { webhookSecret } from "./channel-tools.js";
 import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
 import { RoomServiceClient } from "livekit-server-sdk";
@@ -678,29 +680,45 @@ export default defineAgent({
     const callSessionId = cleanText(metadata.callSessionId || "");
     const normalizedPhone = normalizePhoneForMemory(phoneNumber);
 
-    const [agentStateSummary, callSession, recentInteractions, continuityCheckpoint] = await Promise.all([
-      sbGetAgentState(KUZYA_OWNER_USER_ID),
-      sbGetCallSession(callSessionId),
-      sbGetRecentKuziaInteractions(3),
-      sbGetLatestContinuityCheckpoint()
-    ]);
+    // The called person is not necessarily the owner. Start with this call's task only.
+    const callSession = await sbGetCallSession(callSessionId);
+    const agentStateSummary = "";
+    const recentInteractions = [];
+    const continuityCheckpoint = null;
 
     const continuityCheckpointText =
       formatContinuityCheckpointForVoice(continuityCheckpoint);
 
     const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
 
-    const runtimeInstructions = buildCallInstructions(metadata, {
+    const runtimeInstructions = CONTINUITY_RULES + "\n" + buildCallInstructions(metadata, {
       agentStateSummary,
       callSession,
       recentInteractionsText,
       continuityCheckpointText
-    });
+    }) + "\nДля общей личной памяти Юли нужны /voice в её Telegram и authenticateOwner с кодом. Затем используй readSharedContext для истории и searchInternet для свежих сведений. Называй только выполненные действия. Новые звонки из текущего разговора не запускаются.";
+    const voiceToolCallId = `livekit:${callSessionId || ctx.room.name}`;
+    let ownerAuthenticated = false;
+    const invokeChannelTool = async (name, args) => {
+      try {
+        const response = await fetch(`http://127.0.0.1:${process.env.PORT || 10000}/internal/voice-tool`, {
+          method: "POST", headers: { "Content-Type": "application/json", "X-Kuzya-Internal": webhookSecret(SUPABASE_KEY) },
+          signal: AbortSignal.timeout(12000), body: JSON.stringify({ callId: voiceToolCallId, name, args }) });
+        const result = response.ok ? await response.json() : { ok: false, error: "tool_unavailable" };
+        if (result.authenticated) ownerAuthenticated = true;
+        return result;
+      } catch { return { ok: false, error: "tool_unavailable" }; }
+    };
+    const channelTools = {
+      authenticateOwner: llm.tool({ description: "Подтвердить Юлю кодом /voice из её Telegram.", parameters: z.object({ code: z.string() }), execute: args => invokeChannelTool("authenticate_owner", args) }),
+      readSharedContext: llm.tool({ description: "Прочитать общую память после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("read_shared_context", args) }),
+      searchInternet: llm.tool({ description: "Проверить свежие сведения в интернете после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("search_internet", args) })
+    };
 
     if (callSessionId) {
       await sbUpdateCallSession(callSessionId, {
         status: "voice_agent_started",
-        summary: "Голосовой Кузя стартовал с общим состоянием, связанной записью звонка и последними событиями общей истории.",
+        summary: "Голосовой Кузя стартовал с задачей этого звонка; личная память доступна после подтверждения Юли.",
         self_review: "Звонок воспринимается как часть единого Кузи между Telegram и голосовым каналом, а не как отдельный изолированный бот.",
         metadata: {
           ...(callSession?.metadata || {}),
@@ -716,7 +734,7 @@ export default defineAgent({
 
     await sbLogKuziaInteraction({
       stimulus: instruction,
-      response: "Голосовой агент LiveKit запущен и получил общий контекст Кузи перед звонком.",
+      response: "Голосовой агент запущен с задачей звонка и инструментом общей памяти после подтверждения личности.",
       channel: "outbound_call",
       direction: "internal",
       eventType: "voice_agent_started",
@@ -724,7 +742,7 @@ export default defineAgent({
       telegramChatId: metadata.chatId || null,
       telegramUserId: metadata.userId || null,
       normalizedPhone,
-      summary: "Голосовой Кузя стартовал с общим состоянием, последними взаимодействиями и связанной записью звонка.",
+      summary: "Голосовой Кузя стартовал с задачей звонка и общей схемой инструментов.",
       selfReview: "Этот запуск должен восприниматься как продолжение единой истории Кузи между Telegram и голосовыми звонками.",
       nextAction: "После звонка сохранить итог и самоанализ.",
       importance: 4,
@@ -771,6 +789,24 @@ export default defineAgent({
         voice: process.env.OPENAI_REALTIME_VOICE || "verse"
       })
     });
+
+    const seenTranscripts = new Set();
+    let transcriptWrites = Promise.resolve();
+    session.on("user_input_transcribed", event => {
+      if (!event.isFinal || !event.transcript) return;
+      const key = event.itemId || `${event.createdAt}:${event.transcript}`;
+      if (seenTranscripts.has(key) || seenTranscripts.size >= 500) return;
+      seenTranscripts.add(key);
+      const text = String(event.transcript).replace(/\b\d{6}\b/g, "[код скрыт]").slice(0, 5000);
+      const authenticatedAtSpeech = ownerAuthenticated;
+      transcriptWrites = transcriptWrites.then(() => sbLogKuziaInteraction({
+        stimulus: text, channel: "outbound_call", direction: "incoming", eventType: "voice_user_transcript",
+        callSessionId, telegramChatId: metadata.chatId, telegramUserId: metadata.userId, normalizedPhone,
+        summary: "Распознанная речь собеседника, не автоматически подтверждённый факт.",
+        metadata: { itemId: event.itemId, ownerAuthenticated: authenticatedAtSpeech, interpretation: "asr_may_differ_from_audio" }
+      })).catch(() => console.error("KUZYA_OUTBOUND_TRANSCRIPT_SAVE_FAILED"));
+    });
+    ctx.addShutdownCallback(async () => { await transcriptWrites; });
 
     const livekitHttpUrl = getLiveKitHttpUrl();
 
@@ -1023,7 +1059,7 @@ export default defineAgent({
     const activeParticipant = answer.participant;
     await session.start({
       room: ctx.room,
-      agent: new KuzyaAgent(initialCtx, runtimeInstructions, { endCall })
+      agent: new KuzyaAgent(initialCtx, runtimeInstructions, { endCall, ...channelTools })
     });
 
     await sbLogKuziaInteraction({
