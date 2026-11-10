@@ -8,6 +8,7 @@ import * as openai from '@livekit/agents-plugin-openai';
 import { webhookSecret } from '../channel-tools.js';
 import { createOwnerIdentity } from '../owner-identity.js';
 import crypto from 'node:crypto';
+import { SHARED_CORE_VERSION } from '../assistant-core.js';
 
 // Evaluate the actual application with fake credentials and outbound fetch blocked.
 // LiveKit connection startup is intercepted before any room or call is created.
@@ -436,7 +437,7 @@ test('help, status and liveness work without paid API calls; unsupported media g
   assert.equal(h.sent.length, 3); assert.match(h.sent[0].text, /\/voice/); assert.match(h.sent[1].text, /ещё не проверена/);
   assert.match(h.sent[2].text, /текст и фотографии/); assert.equal(h.api.length, 0);
   const health = await fetch(h.base + '/health'); assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: 'kuzya_shared_core_2026_11_10', phoneAccess: 'telegram_call_button_2026_11_10' });
+  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: SHARED_CORE_VERSION, phoneAccess: 'telegram_call_button_2026_11_10' });
 });
 
 test('a failed memory write warns explicitly after the answer without repeating generation', async t => {
@@ -460,7 +461,7 @@ test('actual Telegram and authenticated phone routes use the same core and persi
   assert.equal((await paired.json()).authenticated, true);
   const phone = await internal('ask_kuzya', { query: 'Второй вопрос в звонке' });
   const result = await phone.json();
-  assert.equal(result.ok, true); assert.equal(result.core, 'kuzya_shared_core_2026_11_10');
+  assert.equal(result.ok, true); assert.equal(result.core, SHARED_CORE_VERSION);
   assert.equal(result.answer, 'Ответ: Второй вопрос в звонке'); assert.equal(result.memorySaved, true);
   const phonePrompt = h.api.at(-1).messages;
   assert.match(phonePrompt[0].content, /Сейчас канал Телефон/);

@@ -8,7 +8,7 @@ function fixtureStore({ memory = [], calls = [], conversation = [], outage = fal
     if (outage) return new Response('', { status: 503 });
     const url = new URL(address);
     const table = url.pathname.split('/').at(-1);
-    const rows = { memory, call_sessions: calls, kuzia_interactions: conversation, chat_archive_anchors: [] }[table];
+    const rows = { memory, call_sessions: calls, kuzia_interactions: conversation, chat_archive_anchors: [], chat_archive_summaries: [], kuzia_evolution: [] }[table];
     // The fixture models the actual REST order and limit. It never connects
     // to the production DB and does not return hidden rows beyond the limit.
     const field = table === 'kuzia_interactions' ? 'timestamp' : 'created_at';
@@ -44,7 +44,7 @@ export async function retrievalBaseline() {
   record('R05', 'Звонок за последними 30 записями', true, callPacket.calls.some(row => row.id === 'old-call'), { totalRows: 31, selectedRows: callPacket.calls.length, callsLimitReached: callPacket.limitsReached.includes('calls') });
 
   const failed = await load({ outage: true }, 'память');
-  record('R06', 'Сбой БД помечается как недоступность', true, failed.partial && failed.unavailable.length === 4, { unavailable: failed.unavailable });
+  record('R06', 'Сбой БД помечается как недоступность', true, failed.partial && failed.unavailable.length === 6, { unavailable: failed.unavailable });
 
   const provenance = await load({ conversation: [{ id: 'dialogue', event_type: 'telegram_message', telegram_user_id: OWNER_TELEGRAM_ID, timestamp: '2026-11-10', stimulus: 'Какие коробки выбрать?', response: 'Я купил 100 коробок.' }] }, 'коробки');
   record('R07', 'Сгенерированные слова отделены от фактов', true,
