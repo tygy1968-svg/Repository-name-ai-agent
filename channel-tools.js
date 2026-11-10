@@ -44,6 +44,7 @@ export function createVoiceAccess({ now = Date.now, randomCode = () => String(cr
 export const VOICE_TOOLS = [
   { type: 'function', name: 'authenticate_owner', description: 'Подтвердить Юлю одноразовым шестизначным кодом из команды /voice в личном Telegram Кузи. Не проси пароли от аккаунтов.', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false } },
   { type: 'function', name: 'read_shared_context', description: 'После подтверждения Юли прочитать общую память, сообщения Telegram Кузе и историю звонков. Вызови перед ответом о прошлых событиях; отсутствие результата не доказывает отсутствие события.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
+  { type: 'function', name: 'ask_kuzya', description: 'После подтверждения Юли обратиться к общему ядру Кузи, которое отвечает также в Telegram. Вызывай перед содержательным ответом о задачах, выборе, прошлых разговорах и актуальных сведениях. Это тот же помощник, не другой агент. Код подтверждения сюда не передавай.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'search_internet', description: 'Найти свежую публичную информацию в интернете. Возвращает источники и время проверки, либо явную ошибку. Не отправляй в запрос личную память, коды или номера.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } }
 ];
 
@@ -61,7 +62,7 @@ export async function searchInternet(query, { apiKey, fetchImpl = fetch } = {}) 
   } catch { return { ok: false, error: 'search_unavailable' }; }
 }
 
-export function createVoiceToolHandler({ callId, access, store, search, onResult = async () => {} }) {
+export function createVoiceToolHandler({ callId, access, store, search, reason, failureText, onResult = async () => {} }) {
   let count = 0;
   return async (name, args) => {
     const finish = async result => {
@@ -78,6 +79,14 @@ export function createVoiceToolHandler({ callId, access, store, search, onResult
       if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required', instruction: 'Telegram подключён. Для личной памяти Юля должна отправить «подключи телефон» в Telegram Кузе и назвать полученный код.' });
       const context = await store.load({ userId: OWNER_TELEGRAM_ID, query: String(args.query || '').slice(0, 500) });
       result = { ok: true, context: formatContext(context) };
+    } else if (name === 'ask_kuzya') {
+      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
+      const query = typeof args.query === 'string' ? args.query.trim() : '';
+      if (!query || query.length > 2000) return finish({ ok: false, error: 'invalid_query' });
+      if (!reason) return finish({ ok: false, error: 'shared_core_not_configured' });
+      try { result = await reason(query); }
+      catch (error) { return finish({ ok: false, error: 'shared_core_unavailable', instruction: failureText ? failureText(error) : 'Не придумывай результат. Сообщи, что сейчас не удалось получить общий ответ.' }); }
+      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
     } else if (name === 'search_internet') {
       if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
       result = await search(args.query);
@@ -115,3 +124,4 @@ export function attachRealtimeTools(socket, handleTool, { logger = console } = {
   });
   return { flush: () => work };
 }
+

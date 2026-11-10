@@ -73,7 +73,7 @@ test('real agent creates its voice session and serializable endCall tool', async
   assert.ok(startedAgent instanceof agents.voice.Agent);
   const tool = startedAgent.toolCtx.getFunctionTool('endCall');
   assert.ok(tool, 'endCall remains registered after the LiveKit upgrade');
-  for (const name of ['authenticateOwner', 'readSharedContext', 'searchInternet']) {
+  for (const name of ['authenticateOwner', 'readSharedContext', 'askKuzya', 'searchInternet']) {
     const connected = startedAgent.toolCtx.getFunctionTool(name);
     assert.ok(connected, name + ' is connected to the actual voice agent');
     assert.equal(agents.llm.toJsonSchema(connected.parameters).type, 'object');
@@ -172,7 +172,7 @@ test('short Telegram phrases use the configured model and current message', asyn
   });
   for (const phrase of ['веди', 'я рядом', 'зачем ты мне']) {
     const before = app.outbound.length;
-    const reply = await app.exports.generateReply('offline-user', phrase, []);
+    const reply = await app.exports.generateReply('1087968824', phrase, []);
     assert.equal(reply, 'Ответ с учётом текущего контекста.');
     const requests = app.outbound.slice(before).filter(r => r.url.endsWith('/chat/completions'));
     assert.ok(requests.length > 0);
@@ -215,7 +215,7 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   assert.equal((await result.json()).accepted, true);
   assert.equal(accepted.model, 'gpt-realtime');
   assert.doesNotMatch(accepted.instructions, /Поговорим о магазине/);
-  assert.deepEqual(accepted.tools.map(t => t.name), ["authenticate_owner", "read_shared_context", "search_internet"]);
+  assert.deepEqual(accepted.tools.map(t => t.name), ["authenticate_owner", "read_shared_context", "ask_kuzya", "search_internet"]);
   assert.match(accepted.instructions, /Это входящий звонок/);
   assert.equal(accepted.audio.input.turn_detection.silence_duration_ms, 800);
   assert.equal(accepted.audio.input.transcription.language, undefined);
@@ -365,7 +365,7 @@ async function reliabilityHarness(t, { apiFailure = null, auditFailure = false }
   }, express);
   const app = await loadApplication('server.js', { express: { default: wrapper } }, {
     PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
-  }, { exports: ['telegramQueue', 'openaiChat', 'modelHealth'], fetch: async (url, options) => {
+  }, { exports: ['telegramQueue', 'openaiChat', 'modelHealth', 'voiceAccess'], fetch: async (url, options) => {
     if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
     if (url.startsWith('https://database.invalid/')) {
       if (options.method === 'POST') {
@@ -435,7 +435,7 @@ test('help, status and liveness work without paid API calls; unsupported media g
   assert.equal(h.sent.length, 3); assert.match(h.sent[0].text, /\/voice/); assert.match(h.sent[1].text, /ещё не проверена/);
   assert.match(h.sent[2].text, /текст и фотографии/); assert.equal(h.api.length, 0);
   const health = await fetch(h.base + '/health'); assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10' });
+  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: 'kuzya_shared_core_2026_11_10' });
 });
 
 test('a failed memory write warns explicitly after the answer without repeating generation', async t => {
@@ -445,4 +445,45 @@ test('a failed memory write warns explicitly after the answer without repeating 
   assert.match(h.sent[1].text, /сохранить.*в общую память.*не удалось/);
   assert.equal(h.api.length, 2);
 });
+
+test('actual Telegram and authenticated phone routes use the same core and persist a cross-channel turn', async t => {
+  const h = await reliabilityHarness(t);
+  const internal = (name, args) => fetch(h.base + '/internal/voice-tool', { method: 'POST', headers: {
+    'content-type': 'application/json', 'X-Kuzya-Internal': webhookSecret('fake')
+  }, body: JSON.stringify({ callId: 'livekit:shared-test', name, args }) });
+  const denied = await internal('ask_kuzya', { query: 'Личная память' });
+  assert.equal((await denied.json()).error, 'owner_authentication_required'); assert.equal(h.api.length, 0);
+  await h.post(201, 'Первый вопрос из Telegram'); await h.app.exports.telegramQueue.drain();
+  const code = h.app.exports.voiceAccess.issue('1087968824');
+  const paired = await internal('authenticate_owner', { code });
+  assert.equal((await paired.json()).authenticated, true);
+  const phone = await internal('ask_kuzya', { query: 'Второй вопрос в звонке' });
+  const result = await phone.json();
+  assert.equal(result.ok, true); assert.equal(result.core, 'kuzya_shared_core_2026_11_10');
+  assert.equal(result.answer, 'Ответ: Второй вопрос в звонке'); assert.equal(result.memorySaved, true);
+  const phonePrompt = h.api.at(-1).messages;
+  assert.match(phonePrompt[0].content, /Сейчас канал Телефон/);
+  assert(phonePrompt.some(row => row.role === 'assistant' && row.content === 'Ответ: Первый вопрос из Telegram'));
+  assert.equal(h.sent.length, 1, 'phone backend returns to the existing call, not another Telegram chat');
+  const persisted = h.audits.flat().find(row => row.event_type === 'shared_core_reply');
+  assert.equal(persisted.metadata.ownerAuthenticated, true);
+  assert.equal(persisted.metadata.delivery, 'tool_result_not_proof_of_spoken_delivery');
+  await h.post(202, 'Возвращаемся в Telegram'); await h.app.exports.telegramQueue.drain();
+  assert(h.api.at(-1).messages.some(row => row.role === 'assistant' && row.content === result.answer));
+});
+
+test('the common phone core explains the same billing error without pretending to have answered', async t => {
+  const h = await reliabilityHarness(t, { apiFailure: 'credit_balance_exhausted' });
+  const post = (name, args) => fetch(h.base + '/internal/voice-tool', { method: 'POST', headers: {
+    'content-type': 'application/json', 'X-Kuzya-Internal': webhookSecret('fake')
+  }, body: JSON.stringify({ callId: 'livekit:shared-billing', name, args }) });
+  const code = h.app.exports.voiceAccess.issue('1087968824');
+  await post('authenticate_owner', { code });
+  const response = await post('ask_kuzya', { query: 'Продолжим задачу' });
+  const result = await response.json();
+  assert.equal(result.ok, false); assert.match(result.instruction, /пополнить баланс/);
+  assert.equal(result.answer, undefined); assert.equal(h.sent.length, 0); assert.equal(h.api.length, 1);
+  assert.equal(h.audits.flat().filter(row => row.event_type === 'shared_core_reply').length, 0);
+});
+
 

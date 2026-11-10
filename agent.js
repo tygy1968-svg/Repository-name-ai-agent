@@ -1,3 +1,4 @@
+import { VOICE_CORE_RULES } from './assistant-core.js';
 import { CONTINUITY_RULES, channelCapabilities } from "./unified-context.js";
 import { webhookSecret } from "./channel-tools.js";
 import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
@@ -691,7 +692,7 @@ export default defineAgent({
 
     const recentInteractionsText = formatRecentInteractionsForPrompt(recentInteractions);
 
-    const runtimeInstructions = CONTINUITY_RULES + "\n" + channelCapabilities("исходящий телефон", Boolean(process.env.SERP_API_KEY)) + "\n" + buildCallInstructions(metadata, {
+    const runtimeInstructions = CONTINUITY_RULES + "\n" + VOICE_CORE_RULES + "\n" + channelCapabilities("исходящий телефон", Boolean(process.env.SERP_API_KEY)) + "\n" + buildCallInstructions(metadata, {
       agentStateSummary,
       callSession,
       recentInteractionsText,
@@ -703,7 +704,7 @@ export default defineAgent({
       try {
         const response = await fetch(`http://127.0.0.1:${process.env.PORT || 10000}/internal/voice-tool`, {
           method: "POST", headers: { "Content-Type": "application/json", "X-Kuzya-Internal": webhookSecret(SUPABASE_KEY) },
-          signal: AbortSignal.timeout(12000), body: JSON.stringify({ callId: voiceToolCallId, name, args }) });
+          signal: AbortSignal.timeout(name === "ask_kuzya" ? 60000 : 12000), body: JSON.stringify({ callId: voiceToolCallId, name, args }) });
         const result = response.ok ? await response.json() : { ok: false, error: "tool_unavailable" };
         if (result.authenticated) ownerAuthenticated = true;
         return result;
@@ -712,6 +713,7 @@ export default defineAgent({
     const channelTools = {
       authenticateOwner: llm.tool({ description: "Подтвердить Юлю кодом /voice из её Telegram.", parameters: z.object({ code: z.string() }), execute: args => invokeChannelTool("authenticate_owner", args) }),
       readSharedContext: llm.tool({ description: "Прочитать общую память после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("read_shared_context", args) }),
+      askKuzya: llm.tool({ description: "Обратиться к тому же общему ядру Кузи, что отвечает в Telegram. После подтверждения Юли используй перед содержательным ответом; код сюда не передавай.", parameters: z.object({ query: z.string().max(2000) }), execute: args => invokeChannelTool("ask_kuzya", args) }),
       searchInternet: llm.tool({ description: "Проверить свежие сведения в интернете после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("search_internet", args) })
     };
 
@@ -1339,4 +1341,5 @@ cli.runApp(
     agentName: "kuzya-agent"
   })
 );
+
 
