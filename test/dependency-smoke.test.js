@@ -73,7 +73,7 @@ test('real agent creates its voice session and serializable endCall tool', async
   assert.ok(startedAgent instanceof agents.voice.Agent);
   const tool = startedAgent.toolCtx.getFunctionTool('endCall');
   assert.ok(tool, 'endCall remains registered after the LiveKit upgrade');
-  for (const name of ['authenticateOwner', 'readSharedContext', 'askKuzya', 'searchInternet']) {
+  for (const name of ['requestOwnerAccess', 'readSharedContext', 'askKuzya', 'searchInternet']) {
     const connected = startedAgent.toolCtx.getFunctionTool(name);
     assert.ok(connected, name + ' is connected to the actual voice agent');
     assert.equal(agents.llm.toJsonSchema(connected.parameters).type, 'object');
@@ -86,7 +86,7 @@ test('real agent creates its voice session and serializable endCall tool', async
   assert.ok(app.outbound.length > 0, 'agent exercised the mocked memory path');
 });
 
-test('real HTTP server starts, serves the voice UI, and acknowledges an empty webhook', async (t) => {
+test('real HTTP server serves the voice UI and rejects unauthenticated webhooks', async (t) => {
   const express = (await import('express')).default;
   let server;
   const wrapper = Object.assign(function () {
@@ -108,7 +108,7 @@ test('real HTTP server starts, serves the voice UI, and acknowledges an empty we
   const webhook = await fetch(base + '/webhook', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
   });
-  assert.equal(webhook.status, 200);
+  assert.equal(webhook.status, 403);
   assert.equal(app.outbound.length, 0, 'readiness checks must not send messages or write memory');
 });
 
@@ -215,7 +215,7 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   assert.equal((await result.json()).accepted, true);
   assert.equal(accepted.model, 'gpt-realtime');
   assert.doesNotMatch(accepted.instructions, /Поговорим о магазине/);
-  assert.deepEqual(accepted.tools.map(t => t.name), ["authenticate_owner", "read_shared_context", "ask_kuzya", "search_internet"]);
+  assert.deepEqual(accepted.tools.map(t => t.name), ["request_owner_access", "read_shared_context", "ask_kuzya", "search_internet"]);
   assert.match(accepted.instructions, /Это входящий звонок/);
   assert.equal(accepted.audio.input.turn_detection.silence_duration_ms, 800);
   assert.equal(accepted.audio.input.transcription.language, undefined);
@@ -228,7 +228,7 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   assert.equal(saved.metadata.ownerAuthenticated, false);
 });
 
-test('actual Telegram route rejects spoofing and issues pairing code only in owner private chat', async (t) => {
+test('actual Telegram route rejects spoofing and restricts phone help to the bound owner', async (t) => {
   const express = (await import('express')).default;
   let server;
   const wrapper = Object.assign(function () {
@@ -240,7 +240,7 @@ test('actual Telegram route rejects spoofing and issues pairing code only in own
   }, { fetch: async (url, options) => {
     if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
     assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
-    assert.match(JSON.parse(options.body).text, /Код для общей памяти/);
+    assert.match(JSON.parse(options.body).text, /Диктовать коды не нужно/);
     return Response.json({ ok: true });
   } });
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -258,7 +258,7 @@ test('actual Telegram route rejects spoofing and issues pairing code only in own
 
 
 for (const privateAvailable of [true, false]) {
-  test(`workspace /voice handles private delivery ${privateAvailable ? 'success' : 'failure without leaking code'}`, async (t) => {
+  test(`workspace /voice handles private delivery ${privateAvailable ? 'success' : 'failure without exposing private access'}`, async (t) => {
     const express = (await import('express')).default;
     let server;
     const sent = [];
@@ -276,13 +276,13 @@ for (const privateAvailable of [true, false]) {
       assert.equal(url, 'https://api.telegram.org/bottest-only/sendMessage');
       const body = JSON.parse(options.body); sent.push(body);
       if (String(body.chat_id) === '987654321') {
-        assert.match(body.text, /Код для общей памяти/);
+        assert.match(body.text, /Диктовать коды не нужно/);
         return privateAvailable ? Response.json({ ok: true }) : Response.json({ ok: false, error_code: 403 }, { status: 403 });
       }
       assert.equal(String(body.chat_id), '-1003870803501');
       assert.doesNotMatch(body.text, /\b[0-9]{6}\b/);
-      if (privateAvailable) assert.match(body.text, /Код отправлен/);
-      else { assert.match(body.text, /Не получилось отправить код/); assert.match(body.text, /https:\/\/t.me\/TestKuzyaBot/); }
+      if (privateAvailable) assert.match(body.text, /Инструкция отправлена/);
+      else { assert.match(body.text, /Не получилось написать тебе/); assert.match(body.text, /https:\/\/t.me\/TestKuzyaBot/); }
       done(); return Response.json({ ok: true });
     } });
     t.after(() => new Promise(resolve => server.close(resolve)));
@@ -298,7 +298,7 @@ for (const privateAvailable of [true, false]) {
 }
 
 
-test('actual HTTP enrollment persists identity and delivers a code to the real private sender', async (t) => {
+test('actual HTTP enrollment persists identity and delivers no-code phone instructions privately', async (t) => {
   const express = (await import('express')).default;
   let server, row, delivered;
   const sent = [];
@@ -320,7 +320,7 @@ test('actual HTTP enrollment persists identity and delivers a code to the real p
       const body = JSON.parse(options.body); sent.push(body);
       assert.equal(body.chat_id, '987654321');
       assert.match(body.text, /Твой личный Telegram подключён/);
-      assert.match(body.text, /\b\d{6}\b/);
+      assert.doesNotMatch(body.text, /\b\d{6}\b/);
       delivered(); return Response.json({ ok: true });
     }
   });
@@ -375,6 +375,7 @@ async function reliabilityHarness(t, { apiFailure = null, auditFailure = false }
       }
       return Response.json([]);
     }
+    if (url.endsWith('/answerCallbackQuery')) return Response.json({ ok: true });
     if (url.endsWith('/sendMessage')) { sent.push(JSON.parse(options.body)); return Response.json({ ok: true, result: { message_id: sent.length } }); }
     assert.equal(url, 'https://api.openai.com/v1/chat/completions');
     const body = JSON.parse(options.body); api.push(body);
@@ -435,7 +436,7 @@ test('help, status and liveness work without paid API calls; unsupported media g
   assert.equal(h.sent.length, 3); assert.match(h.sent[0].text, /\/voice/); assert.match(h.sent[1].text, /ещё не проверена/);
   assert.match(h.sent[2].text, /текст и фотографии/); assert.equal(h.api.length, 0);
   const health = await fetch(h.base + '/health'); assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: 'kuzya_shared_core_2026_11_10' });
+  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: 'kuzya_shared_core_2026_11_10', phoneAccess: 'telegram_call_button_2026_11_10' });
 });
 
 test('a failed memory write warns explicitly after the answer without repeating generation', async t => {
@@ -452,7 +453,7 @@ test('actual Telegram and authenticated phone routes use the same core and persi
     'content-type': 'application/json', 'X-Kuzya-Internal': webhookSecret('fake')
   }, body: JSON.stringify({ callId: 'livekit:shared-test', name, args }) });
   const denied = await internal('ask_kuzya', { query: 'Личная память' });
-  assert.equal((await denied.json()).error, 'owner_authentication_required'); assert.equal(h.api.length, 0);
+  assert.equal((await denied.json()).approvalPending, true); assert.equal(h.api.length, 0);
   await h.post(201, 'Первый вопрос из Telegram'); await h.app.exports.telegramQueue.drain();
   const code = h.app.exports.voiceAccess.issue('1087968824');
   const paired = await internal('authenticate_owner', { code });
@@ -464,12 +465,37 @@ test('actual Telegram and authenticated phone routes use the same core and persi
   const phonePrompt = h.api.at(-1).messages;
   assert.match(phonePrompt[0].content, /Сейчас канал Телефон/);
   assert(phonePrompt.some(row => row.role === 'assistant' && row.content === 'Ответ: Первый вопрос из Telegram'));
-  assert.equal(h.sent.length, 1, 'phone backend returns to the existing call, not another Telegram chat');
+  assert.equal(h.sent.filter(message => !message.reply_markup).length, 1, 'phone answer returns to the existing call; only the explicit approval button goes to Telegram');
   const persisted = h.audits.flat().find(row => row.event_type === 'shared_core_reply');
   assert.equal(persisted.metadata.ownerAuthenticated, true);
   assert.equal(persisted.metadata.delivery, 'tool_result_not_proof_of_spoken_delivery');
   await h.post(202, 'Возвращаемся в Telegram'); await h.app.exports.telegramQueue.drain();
   assert(h.api.at(-1).messages.some(row => row.role === 'assistant' && row.content === result.answer));
+});
+
+test('actual callback route grants only the bound owner current call and reaches the common core without a code', async t => {
+  const h = await reliabilityHarness(t);
+  const internal = (name, args = {}) => fetch(h.base + '/internal/voice-tool', { method: 'POST', headers: {
+    'content-type': 'application/json', 'X-Kuzya-Internal': webhookSecret('fake')
+  }, body: JSON.stringify({ callId: 'livekit:button-test', name, args }) });
+  const pending = await (await internal('request_owner_access')).json();
+  assert.equal(pending.approvalPending, true); assert.equal(h.api.length, 0);
+  assert.equal(h.app.exports.voiceAccess.has('livekit:button-test'), false);
+  const button = h.sent[0]; assert.equal(String(button.chat_id), '987654321');
+  const callback = { id: 'offline-callback', from: { id: 987654321, is_bot: false },
+    message: { message_id: 1, chat: { id: 987654321, type: 'private' } }, data: button.reply_markup.inline_keyboard[0][0].callback_data };
+  const click = (callback_query, secret = webhookSecret('test-only')) => fetch(h.base + '/webhook', { method: 'POST',
+    headers: { 'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': secret }, body: JSON.stringify({ callback_query }) });
+  assert.equal((await click(callback, 'bad')).status, 403);
+  await click({ ...callback, from: { id: 1, is_bot: false } });
+  assert.equal(h.app.exports.voiceAccess.has('livekit:button-test'), false);
+  assert.equal((await click(callback)).status, 200);
+  assert.equal(h.app.exports.voiceAccess.has('livekit:button-test'), true);
+  const answer = await (await internal('ask_kuzya', { query: 'Продолжим разговор из Telegram' })).json();
+  assert.equal(answer.ok, true); assert.equal(answer.authenticated, true); assert.equal(answer.memorySaved, true);
+  assert.equal(h.sent.length, 1, 'no generated phone answer or code is posted to Telegram');
+  await internal('close_access'); assert.equal(h.app.exports.voiceAccess.has('livekit:button-test'), false);
+  await click(callback); assert.equal(h.app.exports.voiceAccess.has('livekit:button-test'), false);
 });
 
 test('the common phone core explains the same billing error without pretending to have answered', async t => {

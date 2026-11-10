@@ -36,13 +36,14 @@ export function createVoiceAccess({ now = Date.now, randomCode = () => String(cr
       challenge = null; authorized.set(callId, now() + 45 * 60000); return true;
     },
     has(callId) { return (authorized.get(callId) || 0) > now(); },
+    authorize(callId) { if (!callId) throw new Error('call_required'); authorized.set(callId, now() + 45 * 60000); },
     revoke(callId) { authorized.delete(callId); },
     redact(text) { return challenge ? String(text).split(challenge.code).join('[код скрыт]') : String(text).replace(/\b\d{6}\b/g, '[код скрыт]'); }
   };
 }
 
 export const VOICE_TOOLS = [
-  { type: 'function', name: 'authenticate_owner', description: 'Подтвердить Юлю одноразовым шестизначным кодом из команды /voice в личном Telegram Кузи. Не проси пароли от аккаунтов.', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false } },
+  { type: 'function', name: 'request_owner_access', description: 'Открыть личную память Юли без диктовки кодов: отправить кнопку «Это я — открыть память» в её личный Telegram. Вызывай при просьбе открыть память или вопросе о личных событиях до подтверждения; после нажатия и слова «готово» вызови снова или ask_kuzya. Не отправляет сообщений другим людям.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
   { type: 'function', name: 'read_shared_context', description: 'После подтверждения Юли прочитать общую память, сообщения Telegram Кузе и историю звонков. Вызови перед ответом о прошлых событиях; отсутствие результата не доказывает отсутствие события.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'ask_kuzya', description: 'После подтверждения Юли обратиться к общему ядру Кузи, которое отвечает также в Telegram. Вызывай перед содержательным ответом о задачах, выборе, прошлых разговорах и актуальных сведениях. Это тот же помощник, не другой агент. Код подтверждения сюда не передавай.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'search_internet', description: 'Найти свежую публичную информацию в интернете. Возвращает источники и время проверки, либо явную ошибку. Не отправляй в запрос личную память, коды или номера.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } }
@@ -62,7 +63,7 @@ export async function searchInternet(query, { apiKey, fetchImpl = fetch } = {}) 
   } catch { return { ok: false, error: 'search_unavailable' }; }
 }
 
-export function createVoiceToolHandler({ callId, access, store, search, reason, failureText, onResult = async () => {} }) {
+export function createVoiceToolHandler({ callId, access, store, search, reason, requestAccess, failureText, onResult = async () => {} }) {
   let count = 0;
   return async (name, args) => {
     const finish = async result => {
@@ -72,15 +73,18 @@ export function createVoiceToolHandler({ callId, access, store, search, reason, 
     };
     if (++count > 40) return finish({ ok: false, error: 'call_tool_limit' });
     let result;
-    if (name === 'authenticate_owner') {
+    const needAccess = () => requestAccess ? requestAccess() : { ok: false, error: 'owner_authentication_required' };
+    if (name === 'request_owner_access') {
+      result = access.has(callId) ? { ok: true, authenticated: true } : await needAccess();
+    } else if (name === 'authenticate_owner') {
       if (!access.has(callId) && !access.verify(callId, args.code)) return finish({ ok: false, error: 'authentication_failed', instruction: 'Нужен именно шестизначный код, созданный ботом после /voice или «подключи телефон». Пользовательский номер/личный PIN не является этим кодом. Telegram подключён; личная память ещё не открыта.' });
       result = { ok: true, authenticated: true, context: await store.load({ userId: OWNER_TELEGRAM_ID }) };
     } else if (name === 'read_shared_context') {
-      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required', instruction: 'Telegram подключён. Для личной памяти Юля должна отправить «подключи телефон» в Telegram Кузе и назвать полученный код.' });
+      if (!access.has(callId)) return finish(await needAccess());
       const context = await store.load({ userId: OWNER_TELEGRAM_ID, query: String(args.query || '').slice(0, 500) });
       result = { ok: true, context: formatContext(context) };
     } else if (name === 'ask_kuzya') {
-      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
+      if (!access.has(callId)) return finish(await needAccess());
       const query = typeof args.query === 'string' ? args.query.trim() : '';
       if (!query || query.length > 2000) return finish({ ok: false, error: 'invalid_query' });
       if (!reason) return finish({ ok: false, error: 'shared_core_not_configured' });
@@ -88,10 +92,10 @@ export function createVoiceToolHandler({ callId, access, store, search, reason, 
       catch (error) { return finish({ ok: false, error: 'shared_core_unavailable', instruction: failureText ? failureText(error) : 'Не придумывай результат. Сообщи, что сейчас не удалось получить общий ответ.' }); }
       if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
     } else if (name === 'search_internet') {
-      if (!access.has(callId)) return finish({ ok: false, error: 'owner_authentication_required' });
+      if (!access.has(callId)) return finish(await needAccess());
       result = await search(args.query);
     } else return finish({ ok: false, error: 'unknown_tool' });
-    return finish(result);
+    return finish(access.has(callId) ? { ...result, authenticated: true } : result);
   };
 }
 

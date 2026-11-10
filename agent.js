@@ -697,7 +697,7 @@ export default defineAgent({
       callSession,
       recentInteractionsText,
       continuityCheckpointText
-    }) + "\nДля общей личной памяти Юли нужны /voice в её Telegram и authenticateOwner с кодом. Затем используй readSharedContext для истории и searchInternet для свежих сведений. Называй только выполненные действия. Новые звонки из текущего разговора не запускаются.";
+    }) + "\nДля общей личной памяти Юли вызови requestOwnerAccess: она нажмёт кнопку в личном Telegram и скажет «готово». Не проси диктовать код. После «готово» проверь доступ инструментом, затем используй askKuzya для общего ответа. Называй только выполненные действия. Новые звонки из текущего разговора не запускаются.";
     const voiceToolCallId = `livekit:${callSessionId || ctx.room.name}`;
     let ownerAuthenticated = false;
     const invokeChannelTool = async (name, args) => {
@@ -706,12 +706,14 @@ export default defineAgent({
           method: "POST", headers: { "Content-Type": "application/json", "X-Kuzya-Internal": webhookSecret(SUPABASE_KEY) },
           signal: AbortSignal.timeout(name === "ask_kuzya" ? 60000 : 12000), body: JSON.stringify({ callId: voiceToolCallId, name, args }) });
         const result = response.ok ? await response.json() : { ok: false, error: "tool_unavailable" };
-        if (result.authenticated) ownerAuthenticated = true;
+        if (typeof result.authenticated === 'boolean') ownerAuthenticated = result.authenticated;
         return result;
       } catch { return { ok: false, error: "tool_unavailable" }; }
     };
+    ctx.addShutdownCallback(async () => { await invokeChannelTool("close_access", {}); });
+    ctx.room.once('disconnected', () => { ownerAuthenticated = false; invokeChannelTool("close_access", {}).catch(() => {}); });
     const channelTools = {
-      authenticateOwner: llm.tool({ description: "Подтвердить Юлю кодом /voice из её Telegram.", parameters: z.object({ code: z.string() }), execute: args => invokeChannelTool("authenticate_owner", args) }),
+      requestOwnerAccess: llm.tool({ description: "Запросить кнопку подтверждения текущего звонка в личном Telegram Юли, без диктовки кодов. После нажатия проверить доступ повторным вызовом.", parameters: z.object({}), execute: args => invokeChannelTool("request_owner_access", args) }),
       readSharedContext: llm.tool({ description: "Прочитать общую память после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("read_shared_context", args) }),
       askKuzya: llm.tool({ description: "Обратиться к тому же общему ядру Кузи, что отвечает в Telegram. После подтверждения Юли используй перед содержательным ответом; код сюда не передавай.", parameters: z.object({ query: z.string().max(2000) }), execute: args => invokeChannelTool("ask_kuzya", args) }),
       searchInternet: llm.tool({ description: "Проверить свежие сведения в интернете после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("search_internet", args) })

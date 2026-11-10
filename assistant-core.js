@@ -55,7 +55,7 @@ ${formatContext(packet)}
     let answer = await complete(messages, { temperature: 0.4, max_tokens: 700, timeoutMs: channel === 'phone' ? 12000 : 20000 });
     if (falseCapabilityDenial(answer)) {
       answer = await complete([...messages, { role: 'system', content: 'Предыдущий черновик ошибочно отрицал подключённые возможности. Ответь заново по ПРОВЕРЕННОЙ КОНФИГУРАЦИИ: телефон и Telegram подключены к одному Кузе. Память в телефоне открывается после подтверждения, ограничения конкретного действия объясняй точно.' }], { temperature: 0, max_tokens: 700, timeoutMs: channel === 'phone' ? 8000 : 20000 });
-      if (falseCapabilityDenial(answer)) answer = 'Юль, у меня подключены телефон и Telegram. Общая личная память в звонке открывается по коду /voice из моего личного Telegram. Наличие канала и разрешение на конкретное действие проверяются отдельно.';
+      if (falseCapabilityDenial(answer)) answer = 'Юль, у меня подключены телефон и Telegram. Общая личная память в звонке открывается кнопкой «Это я — открыть память» в моём личном Telegram, без диктовки кодов. Наличие канала и разрешение на конкретное действие проверяются отдельно.';
     }
     check(authorize);
     if (typeof answer !== 'string' || !answer.trim()) throw new Error('empty_core_reply');
