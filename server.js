@@ -1850,8 +1850,14 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
   });
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenAI error: ${errText}`);
+    // Log only bounded machine-readable fields, never the raw body: API error
+    // messages can echo credentials or private input. Preserve actionable causes.
+    let failure;
+    try { failure = await res.json(); } catch { failure = null; }
+    const safeField = value => typeof value === "string" && /^[a-z0-9_]{1,80}$/i.test(value) ? value : null;
+    const details = { status: res.status, code: safeField(failure?.error?.code), type: safeField(failure?.error?.type) };
+    console.error("KUZYA_OPENAI_CHAT_FAILED", details);
+    throw new Error(`OpenAI request failed: HTTP ${res.status}, code ${details.code || "unknown"}`);
   }
 
   const data = await res.json();
