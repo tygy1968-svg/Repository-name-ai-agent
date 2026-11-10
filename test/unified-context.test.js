@@ -31,7 +31,10 @@ test('shared context works without embeddings, excludes refutations and model cl
   assert.equal(packet.facts.length, 1);
   assert.equal(packet.facts[0].evidence, 'owner_confirmed');
   assert.equal(packet.userStatements.length, 2);
-  assert.doesNotMatch(JSON.stringify(packet), /Выдуманный|Чужая|Опровергнутый/);
+  assert.doesNotMatch(JSON.stringify({ facts: packet.facts, statements: packet.userStatements }), /Выдуманный|Чужая|Опровергнутый/);
+  assert.doesNotMatch(JSON.stringify(packet), /Чужая|Опровергнутый/);
+  assert.equal(packet.recentDialog.find(row => row.priorAssistantWords).priorAssistantWords, 'Выдуманный совместный проект');
+  assert.match(packet.recentDialog.find(row => row.priorAssistantWords).evidence, /assistant_words_are_not_facts/);
 });
 
 test('database outage is marked unavailable, not proof of empty memory', async () => {
@@ -145,3 +148,37 @@ test('failed authentication is auditable without recording the supplied code', a
   assert.equal(audit[0].error, 'authentication_failed');
   assert.doesNotMatch(JSON.stringify(audit), /12345/);
 });
+
+test('shared core phone tool requires authorization, validates questions and reports failures without leaking data', async () => {
+  let authorized = false, called = 0;
+  const access = { has: () => authorized };
+  const handler = createVoiceToolHandler({ callId: 'call', access, store: {}, reason: async query => { called++; return { ok: true, answer: 'Общий ответ: ' + query }; } });
+  assert.equal((await handler('ask_kuzya', { query: 'Наш план' })).error, 'owner_authentication_required');
+  assert.equal(called, 0); authorized = true;
+  assert.equal((await handler('ask_kuzya', { query: ' ' })).error, 'invalid_query');
+  assert.equal((await handler('ask_kuzya', { query: 'x'.repeat(2001) })).error, 'invalid_query');
+  assert.equal((await handler('ask_kuzya', { query: 'Наш план' })).answer, 'Общий ответ: Наш план');
+  const broken = createVoiceToolHandler({ callId: 'call', access, store: {}, reason: async () => { throw Error('sk-SECRET'); } });
+  const failure = await broken('ask_kuzya', { query: 'Наш план' });
+  assert.equal(failure.error, 'shared_core_unavailable'); assert.doesNotMatch(JSON.stringify(failure), /SECRET/);
+});
+
+test('persistent dialogue joins verified channels while model words remain separate from source facts', async () => {
+  const store = createContextStore({ url: 'https://db.invalid', key: 'fake', fetchImpl: async url => {
+    if (new URL(url).pathname.endsWith('/kuzia_interactions')) return Response.json([
+      { event_type: 'telegram_message', telegram_user_id: OWNER_TELEGRAM_ID, stimulus: 'Сравни варианты', response: 'Предложил вариант A', metadata: { ownerAuthenticated: true }, timestamp: '2026-11-10T10:00:00Z' },
+      { event_type: 'voice_user_transcript', stimulus: 'Выбираем B', metadata: { ownerAuthenticated: true }, timestamp: '2026-11-10T10:01:00Z' },
+      { event_type: 'shared_core_reply', stimulus: 'Продолжить выбор', response: 'Вариант B требует проверки', metadata: { ownerAuthenticated: true }, timestamp: '2026-11-10T10:02:00Z' },
+      { event_type: 'shared_core_reply', stimulus: 'ЧУЖОЕ', response: 'PRIVATE OTHER', metadata: { ownerAuthenticated: false }, timestamp: '2026-11-10T10:03:00Z' }
+    ]);
+    return Response.json([]);
+  } });
+  const result = await store.load({ userId: OWNER_TELEGRAM_ID });
+  assert.equal(result.userStatements.length, 2); assert.equal(result.recentDialog.length, 3);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE OTHER|ЧУЖОЕ/);
+  assert.doesNotMatch(JSON.stringify(result.facts), /Вариант B/);
+  const delegated = result.recentDialog.at(-1);
+  assert.equal(delegated.delegatedQuestion, 'Продолжить выбор');
+  assert.equal(delegated.userWords, undefined); assert.match(delegated.evidence, /not_proof_of_spoken_delivery/);
+});
+

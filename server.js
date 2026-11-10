@@ -1,3 +1,4 @@
+import { createAssistantCore, SHARED_CORE_VERSION } from "./assistant-core.js";
 import { RELIABILITY_VERSION, GROUP_IDENTITY_HINT, telegramDecision, createTelegramQueue, createNoticeLimiter, splitTelegramText, telegramFailureText, isAccountError } from "./telegram-reliability.js";
 import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, falseCapabilityDenial, createContextStore, formatContext } from "./unified-context.js";
 import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
@@ -61,7 +62,10 @@ const searchConnectedInternet = query => searchInternet(query, { apiKey: process
 console.log("KUZYA_CONTEXT_VERSION", "shared_context_2026_10_27");
 
 // ---------- MEMORY IN RAM ----------
-const dialogHistory = {};
+const sharedAssistant = createAssistantCore({ store: sharedStore, complete: (...args) => openaiChat(...args),
+  plan: (...args) => planStep(...args), search: searchConnectedInternet,
+  internetConfigured: Boolean(process.env.SERP_API_KEY), isFatal: isAccountError });
+console.log("KUZYA_SHARED_CORE_CONFIG", { version: SHARED_CORE_VERSION, model: CHAT_MODEL, channels: ["telegram", "inbound_phone", "livekit_phone"] });
 
 const bridgeExports = new Map();
 // token -> { text, expiresAt, readsLeft, createdAt }
@@ -2291,14 +2295,16 @@ async function planStep(userText, memoryContext) {
 - статистики
 - "сейчас", "в 2026", "на данный момент"
 
-то needs_web = true ВСЕГДА.
+то needs_web = true, если нужна проверка общедоступных сведений.
+В search_query дай короткий обобщённый публичный запрос. Не включай телефоны, коды, адреса, реквизиты, идентификаторы заказов и частные сведения из памяти. Для личных разговоров и задач без публичного вопроса needs_web=false. Никогда не копируй всё сообщение пользователя в поисковый запрос.
 
 Верни строго JSON:
 {
   "type": "direct",
   "needs_memory": false,
   "should_take_position": true,
-  "needs_web": true/false
+  "needs_web": true/false,
+  "search_query": "публичный запрос без личных данных или пустая строка"
 }
 `
       },
@@ -2307,7 +2313,7 @@ async function planStep(userText, memoryContext) {
         content: `ПАМЯТЬ:\n${memoryContext || "нет"}\n\nСООБЩЕНИЕ:\n${userText}`
       }
     ],
-    { temperature: 0.2, max_tokens: 200 }
+    { temperature: 0.2, max_tokens: 200, timeoutMs: 5000 }
   );
 
   try {
@@ -2547,87 +2553,12 @@ ${intent.instruction}
 `.trim();
 }
 
-// ---------- GENERATE REPLY ----------
+// ---------- ONE SHARED ASSISTANT: TELEGRAM + PHOTO + PHONE ----------
 async function generateReply(userId, userText, memory, chatType = 'unknown') {
-  const packet = await sharedStore.load({ userId, query: userText });
-  const history = dialogHistory[userId] || [];
-  let web = { ok: false, error: "not_requested" };
-  try {
-    const plan = await planStep(userText, formatContext(packet));
-    if (plan.needs_web) web = await searchConnectedInternet(userText);
-  } catch (error) {
-    if (isAccountError(error)) throw error;
-    web = { ok: false, error: "search_planning_unavailable" };
-  }
-  const messages = [{ role: "system", content: `${CONTINUITY_RULES}
-${channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY))}
-Сейчас канал Telegram. Подтверждены отправитель Юля и разрешённый чат Telegram.
-Тип текущего чата: ${chatType}. Только private — личная переписка; group/supergroup — группа. Не называй группу личным чатом.
-Ты видишь сохранённые сообщения этого бота, а не весь аккаунт Telegram или чаты ChatGPT.
-Исходящие звонки запускает обработчик явных команд Telegram, не твой текстовый ответ. Если звонок ещё не запущен, не говори «звоню».
-Интернет: ${JSON.stringify(web)}. Только успешные результаты являются проверкой. Приводи ссылки, когда используешь найденное.
-${formatContext(packet)}
-Предыдущие ответы в диалоге — история твоих слов, а не подтверждение фактов. Если противоречат источникам, исправь себя.` },
-    ...history.slice(-20), { role: "user", content: userText }];
-  let reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 700 });
-  if (falseCapabilityDenial(reply)) {
-    console.error("KUZYA_CAPABILITY_REPLY_REPAIR");
-    reply = await openaiChat([...messages, { role: "system", content: "Предыдущий черновик ошибочно отрицал подключённые возможности. Ответь заново по ПРОВЕРЕННОЙ КОНФИГУРАЦИИ: у тебя реально есть входящий телефон и Telegram. Не выдавай ограничение одного канала за отсутствие возможности всего приложения." }], { temperature: 0, max_tokens: 700 });
-    if (falseCapabilityDenial(reply)) reply = "Юль, у меня подключены и телефон, и Telegram. Для общей памяти в звонке напиши здесь «подключи телефон»: я пришлю в личку одноразовый код. Назови его мне по телефону, и я смогу прочитать сохранённую переписку.";
-  }
-  dialogHistory[userId] = [...history, { role: "user", content: userText }, { role: "assistant", content: reply }].slice(-30);
-  return reply;
+  return (await sharedAssistant.respond({ userId, text: userText, channel: "telegram", chatType })).answer;
 }
-
-// ---------- GENERATE VISION REPLY ----------
-async function generateVisionReply(userId, imageUrl, memory) {
-  if (!dialogHistory[userId]) dialogHistory[userId] = [];
-
-  dialogHistory[userId].push({ role: "user", content: "[Пользователь отправил фото]" });
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  const memoryContext = (memory || [])
-    .slice(0, 10)
-    .map(m => m.content)
-    .join("\n");
-
-  const messages = [
-    {
-      role: "system",
-      content: `
-${KUZYA_CORE}
-
-ПАМЯТЬ:
-${memoryContext || "Нет сохранённых фактов"}
-
-Пользователь отправил изображение.
-Опиши, что на изображении.
-Если это уход/косметика/продукт — дай практичный вывод.
-Если не хватает данных — один уточняющий вопрос.
-Кратко, по делу.
-`
-    },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "Проанализируй изображение и ответь пользователю." },
-        { type: "image_url", image_url: { url: imageUrl } }
-      ]
-    }
-  ];
-
-  const reply = await openaiChat(messages, { temperature: 0.4, max_tokens: 350 });
-
-  dialogHistory[userId].push({ role: "assistant", content: reply });
-
-  if (dialogHistory[userId].length > 30) {
-    dialogHistory[userId] = dialogHistory[userId].slice(-30);
-  }
-
-  return reply;
+async function generateVisionReply(userId, imageUrl, memory, caption = '') {
+  return (await sharedAssistant.respond({ userId, text: caption || 'Проанализируй фотографию и ответь по существу.', channel: "telegram", imageUrl })).answer;
 }
 
 // ---------- VAPI WEBHOOK (DIAGNOSTIC) ----------
@@ -2948,14 +2879,13 @@ app.post("/webhook", async (req, res) => {
         const filePath = fileData.result.file_path;
         const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
 
-        const memory = await sbGetMemory(userId);
-        const reply = await generateVisionReply(userId, imageUrl, memory);
+        const reply = await generateVisionReply(userId, imageUrl, [], msg.caption || "");
 
         await tgSendMessage(chatId, reply);
 
         const photoSaved = await sbLogKuziaInteraction({
           userId: "yulia",
-          stimulus: "[Пользователь отправил фото]",
+          stimulus: `[Пользователь отправил фото] ${String(msg.caption || "").slice(0, 3000)}`,
           response: reply,
           channel: "telegram",
           direction: "incoming",
@@ -2968,6 +2898,8 @@ app.post("/webhook", async (req, res) => {
           importance: 2,
           metadata: {
             source: "telegram_webhook",
+            ownerAuthenticated: true,
+            verifiedSenderId: verifiedOwnerId,
             message_id: msg.message_id,
             file_id: fileId
           }
@@ -2992,7 +2924,7 @@ app.post("/webhook", async (req, res) => {
         const packet = await sharedStore.load({ userId });
         const time = value => new Date(value).toLocaleString('ru-UA', { timeZone: 'Europe/Kiev' }) + ' Киев';
         const model = modelHealth.lastError ? `Последняя ошибка: ${telegramFailureText(modelHealth.lastError)} (${time(modelHealth.lastError.at)}).` : modelHealth.lastSuccessAt ? `Последний успешный ответ модели: ${time(modelHealth.lastSuccessAt)}.` : "Модель в этом запуске ещё не проверена.";
-        await tgSendMessage(chatId, `Telegram: это сообщение принято от подтверждённого владельца.\nПамять: ${packet.unavailable.length ? 'часть сохранённой истории сейчас недоступна' : 'чтение доступно; история загружается в ограниченном объёме'}.\n${model}\nТелефон — тот же Кузя; личная память в звонке открывается по коду /voice. Этот статус не запускает звонок и не проверяет звонки вживую.`);
+        await tgSendMessage(chatId, `Один Кузя: общее ядро подключено к Telegram, фотографиям и подтверждённому телефону. Основная модель: ${CHAT_MODEL}.\nTelegram: это сообщение принято от подтверждённого владельца.\nПамять: ${packet.unavailable.length ? 'часть сохранённой истории сейчас недоступна' : 'чтение доступно; история загружается в ограниченном объёме'}.\n${model}\nТелефон — тот же Кузя; личная память в звонке открывается по коду /voice. Этот статус не запускает звонок и не проверяет звонки вживую.`);
         return;
       }
 
@@ -3456,6 +3388,8 @@ app.post("/webhook", async (req, res) => {
         importance: 1,
         metadata: {
           source: "telegram_webhook",
+            ownerAuthenticated: true,
+            verifiedSenderId: verifiedOwnerId,
           message_id: msg.message_id
         }
       });
@@ -4169,7 +4103,18 @@ app.post("/openai-realtime-webhook", async (req, res) => {
 });
 
 function makeVoiceTools(callId) {
-  return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet,
+  return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet, failureText: telegramFailureText,
+    reason: async query => {
+      const question = voiceAccess.redact(query);
+      const result = await sharedAssistant.respond({ userId: OWNER_TELEGRAM_ID, text: question,
+        channel: "phone", authorize: () => voiceAccess.has(callId) });
+      if (!voiceAccess.has(callId)) return { ok: false, error: "owner_authentication_required" };
+      const memorySaved = await sbLogKuziaInteraction({ userId: OWNER_ID, channel: "voice_core", direction: "internal", eventType: "shared_core_reply",
+        stimulus: question, response: result.answer, summary: "Ответ общего ядра в телефонный инструмент; произнесение не подтверждено.",
+        metadata: { ownerAuthenticated: true, openaiCallId: callId, core: SHARED_CORE_VERSION, delivery: "tool_result_not_proof_of_spoken_delivery" }, requestTimeoutMs: 5000 });
+      console.log("KUZYA_SHARED_CORE_PHONE_RESULT", { callId, memorySaved });
+      return { ok: true, ...result, memorySaved, instruction: memorySaved ? "Передай ответ от первого лица; это тот же Кузя." : "Передай ответ; предупреди, что сейчас его не удалось сохранить для другого канала." };
+    },
     onResult: async result => {
       console.log("KUZYA_VOICE_TOOL_RESULT", { callId, name: result.name, ok: result.ok, error: result.error });
       await sbLogKuziaInteraction({ userId: OWNER_ID, channel: "voice_tool", direction: "internal", eventType: "tool_result",
@@ -4212,21 +4157,26 @@ async function secureTelegramWebhook() {
   console.log("KUZYA_TELEGRAM_WEBHOOK_SECURED");
 }
 
-// Bounded startup diagnostics use public configuration and synthetic questions only.
-// They send no Telegram messages, start no calls and do not alter conversation memory.
+// Two bounded real-model checks use an isolated synthetic memory and shared
+// core implementation. No private data, Telegram sends, calls or DB writes.
 async function checkModelCapabilities() {
-  const system = CONTINUITY_RULES + "\n" + channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY));
-  for (const [id, question] of [["incoming", "Я тебе позвоню сейчас и скажи мне номер, который я прислала в Telegram."], ["channels", "Ты в телефоне и в Telegram — разные помощники? Можешь ли принимать звонки?"]]) {
+  const probe = createAssistantCore({ complete: (...args) => openaiChat(...args),
+    store: { load: async () => ({ access: "owner", facts: [], userStatements: [], calls: [], unavailable: [], synthetic: true }) } });
+  const cases = [
+    { id: "incoming", channel: "telegram", question: "Это синтетическая проверка. Наша проверочная встреча в четверг в 15:00. Как подключить общую память к моему телефонному разговору с тобой? Ответь коротко." },
+    { id: "channels", channel: "phone", question: "Продолжаем тот же синтетический разговор по телефону. Когда наша проверочная встреча? Укажи день и время в формате ЧЧ:ММ. Ты тот же Кузя, что в Telegram?" }
+  ];
+  for (const item of cases) {
     try {
-      const answer = await openaiChat([{ role: "system", content: system }, { role: "user", content: question }], { temperature: 0, max_tokens: 220 });
-      const passed = !falseCapabilityDenial(answer) && /звон|телефон/i.test(answer) && /telegram|телеграм/i.test(answer);
-      console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id, passed, answer });
-    } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id }); }
+      const { answer } = await probe.respond({ userId: OWNER_TELEGRAM_ID, text: item.question, channel: item.channel });
+      const passed = !falseCapabilityDenial(answer) && (item.id === "incoming" ? /код|voice|памят/iu.test(answer) : /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer));
+      console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id: item.id, core: SHARED_CORE_VERSION, passed, answer });
+    } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id: item.id }); }
   }
 }
 
 // Liveness only: a billing error must not trigger a destructive restart loop.
-app.get("/health", (req, res) => res.set("Cache-Control", "no-store").json({ ok: true, version: RELIABILITY_VERSION }));
+app.get("/health", (req, res) => res.set("Cache-Control", "no-store").json({ ok: true, version: RELIABILITY_VERSION, core: SHARED_CORE_VERSION }));
 
 // ---------- START ----------
 app.listen(PORT, () => {
@@ -4245,4 +4195,5 @@ app.listen(PORT, () => {
     })).catch(() => console.error("KUZYA_SHARED_CONTEXT_CHECK_FAILED"));
   }
 });
+
 

@@ -1,3 +1,4 @@
+import { VOICE_CORE_RULES } from './assistant-core.js';
 import WebSocket from 'ws';
 
 const phoneKey = value => String(value || '').replace(/\D/g, '');
@@ -30,7 +31,8 @@ export function buildInboundInstructions({ core, pending = null, incomingPhone =
 Не утверждай, что читаешь весь Telegram или все архивы: у тебя только явно переданный контекст.
 Не выполняй внешних действий и не обещай выполненных действий без инструмента и результата.
 На паузу не отвечай повторным приветствием. Дай человеку договорить.
-В этом канале подключены authenticate_owner, read_shared_context и search_internet.
+В этом канале подключены authenticate_owner, read_shared_context, ask_kuzya и search_internet.
+${VOICE_CORE_RULES}
 Если Юля называет шестизначный код из /voice в Telegram, сразу вызови authenticate_owner; не повторяй код вслух.
 До подтверждения не читай личную память. Номер телефона или имя сами по себе не подтверждают личность.
 После подтверждения перед ответами о прошлых разговорах, звонках и задачах вызывай read_shared_context с темой вопроса.
@@ -105,3 +107,4 @@ export function observeRealtimeCall({ callId, apiKey, onRecord, logger = console
   });
   return { socket, flush: () => writes };
 }
+
