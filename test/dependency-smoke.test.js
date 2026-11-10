@@ -354,3 +354,95 @@ test('actual Telegram reply repairs categorical denial of its connected telephon
   assert.equal(repaired, true);
   assert.match(reply, /Да, звони/);
 });
+
+async function reliabilityHarness(t, { apiFailure = null, auditFailure = false } = {}) {
+  const express = (await import('express')).default;
+  let server;
+  const sent = [], api = [], audits = [];
+  const wrapper = Object.assign(function () {
+    const app = express(), listen = app.listen.bind(app);
+    app.listen = (...args) => { server = listen(...args); return server; }; return app;
+  }, express);
+  const app = await loadApplication('server.js', { express: { default: wrapper } }, {
+    PORT: 0, TELEGRAM_TOKEN: 'test-only', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake'
+  }, { exports: ['telegramQueue', 'openaiChat', 'modelHealth'], fetch: async (url, options) => {
+    if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
+    if (url.startsWith('https://database.invalid/')) {
+      if (options.method === 'POST') {
+        assert(url.endsWith('/kuzia_interactions'), 'plain conversation needs only its exact audit, not extracted facts');
+        audits.push(JSON.parse(options.body));
+        return new Response('', { status: auditFailure ? 503 : 201 });
+      }
+      return Response.json([]);
+    }
+    if (url.endsWith('/sendMessage')) { sent.push(JSON.parse(options.body)); return Response.json({ ok: true, result: { message_id: sent.length } }); }
+    assert.equal(url, 'https://api.openai.com/v1/chat/completions');
+    const body = JSON.parse(options.body); api.push(body);
+    if (apiFailure) return Response.json({ error: { code: apiFailure, type: 'insufficient_quota', message: 'sk-SECRET raw input' } }, { status: 429 });
+    const planner = body.messages[0].content.includes('Ты планировщик');
+    const text = planner ? '{"needs_web":false}' : 'Ответ: ' + body.messages.at(-1).content;
+    return Response.json({ choices: [{ message: { content: text } }] });
+  } });
+  t.after(async () => { await app.exports.telegramQueue.drain(); await new Promise(resolve => server.close(resolve)); });
+  if (!server.listening) await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (id, text, changes = {}) => fetch(base + '/webhook', { method: 'POST', headers: {
+    'content-type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': webhookSecret('test-only')
+  }, body: JSON.stringify({ update_id: id, message: { message_id: id, from: { id: 987654321, is_bot: false }, chat: { id: 987654321, type: 'private' }, text, ...changes } }) });
+  return { app, base, post, sent, api, audits };
+}
+
+test('real HTTP handler suppresses duplicate calls and keeps two private messages in sequence', async t => {
+  const h = await reliabilityHarness(t);
+  await h.post(101, 'Первый вопрос');
+  await h.post(101, 'Первый вопрос');
+  await h.post(102, 'Второй вопрос');
+  await h.app.exports.telegramQueue.drain();
+  assert.deepEqual(h.sent.map(row => row.text), ['Ответ: Первый вопрос', 'Ответ: Второй вопрос']);
+  assert.equal(h.api.length, 4, 'one planning call and one answer per distinct message; no fact extraction');
+  const second = h.api.at(-1).messages;
+  assert(second.some(row => row.role === 'assistant' && row.content === 'Ответ: Первый вопрос'));
+  assert.equal(h.audits.length, 2);
+});
+
+test('real HTTP handler explains exhausted balance once without billing retries or leaked error body', async t => {
+  const h = await reliabilityHarness(t, { apiFailure: 'credit_balance_exhausted' });
+  await h.post(103, 'Обычный вопрос'); await h.app.exports.telegramQueue.drain();
+  assert.equal(h.api.length, 1, 'do not retry known billing failures in the answer stage');
+  assert.equal(h.sent.length, 1); assert.match(h.sent[0].text, /пополнить баланс/);
+  assert.doesNotMatch(h.sent[0].text, /SECRET/); assert.equal(h.audits.length, 0);
+  await assert.rejects(h.app.exports.openaiChat([]), error => error.status === 429 && error.code === 'credit_balance_exhausted' && !error.message.includes('SECRET'));
+});
+
+test('anonymous group gets bounded instructions without reading personal memory or creating calls', async t => {
+  const h = await reliabilityHarness(t);
+  const anon = { from: { id: 1087968824, is_bot: true }, sender_chat: { id: -1003870803501 }, chat: { id: -1003870803501, type: 'supergroup' } };
+  await h.post(104, '/lktest +380000000000 private task', anon);
+  await h.post(105, '/voice', anon);
+  await h.post(106, '/voice', { ...anon, chat: { id: -7, type: 'supergroup' } });
+  await h.app.exports.telegramQueue.drain();
+  assert.equal(h.sent.length, 1); assert.match(h.sent[0].text, /https:\/\/t.me\/kuzya_echo_bot/);
+  assert.doesNotMatch(h.sent[0].text, /\b\d{6}\b/);
+  assert.equal(h.app.outbound.filter(row => row.url.startsWith('https://database.invalid/')).length, 0);
+  assert.equal(h.api.length, 0); assert.equal(h.audits.length, 0);
+});
+
+test('help, status and liveness work without paid API calls; unsupported media gets a clear answer', async t => {
+  const h = await reliabilityHarness(t, { apiFailure: 'credit_balance_exhausted' });
+  await h.post(107, '/help'); await h.post(108, '/status');
+  await h.post(109, undefined, { voice: { file_id: 'fake' } });
+  await h.app.exports.telegramQueue.drain();
+  assert.equal(h.sent.length, 3); assert.match(h.sent[0].text, /\/voice/); assert.match(h.sent[1].text, /ещё не проверена/);
+  assert.match(h.sent[2].text, /текст и фотографии/); assert.equal(h.api.length, 0);
+  const health = await fetch(h.base + '/health'); assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10' });
+});
+
+test('a failed memory write warns explicitly after the answer without repeating generation', async t => {
+  const h = await reliabilityHarness(t, { auditFailure: true });
+  await h.post(110, 'Простой вопрос'); await h.app.exports.telegramQueue.drain();
+  assert.equal(h.sent.length, 2); assert.equal(h.sent[0].text, 'Ответ: Простой вопрос');
+  assert.match(h.sent[1].text, /сохранить.*в общую память.*не удалось/);
+  assert.equal(h.api.length, 2);
+});
+
