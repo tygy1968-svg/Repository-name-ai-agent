@@ -2,6 +2,7 @@ import { createAssistantCore, SHARED_CORE_VERSION } from "./assistant-core.js";
 import { RELIABILITY_VERSION, GROUP_IDENTITY_HINT, telegramDecision, createTelegramQueue, createNoticeLimiter, splitTelegramText, telegramFailureText, isAccountError } from "./telegram-reliability.js";
 import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, falseCapabilityDenial, createContextStore, formatContext } from "./unified-context.js";
 import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
+import { createCallApprovals, CALL_APPROVAL_VERSION } from "./call-approvals.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
@@ -53,6 +54,8 @@ const KUZYA_CORE = CONTINUITY_RULES;
 const sharedStore = createContextStore({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const voiceAccess = createVoiceAccess();
 const ownerIdentity = createOwnerIdentity({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
+const callApprovals = createCallApprovals({ access: voiceAccess, loadOwner: () => ownerIdentity.load(), send: tgSendMessage });
+console.log("KUZYA_CALL_APPROVAL_CONFIG", CALL_APPROVAL_VERSION);
 const telegramWebhookSecret = webhookSecret(TELEGRAM_TOKEN);
 const telegramQueue = createTelegramQueue({ onError: () => console.error("KUZYA_TELEGRAM_JOB_FAILED") });
 const allowGroupHint = createNoticeLimiter();
@@ -75,13 +78,13 @@ const dialogState = {};
 // dialogState[userId] = { activeTopic:"", openLoop:"", position:"", summary:"" };
 
 // ---------- TELEGRAM ----------
-async function tgSendMessage(chatId, text) {
+async function tgSendMessage(chatId, text, replyMarkup) {
   let sent;
   for (const chunk of splitTelegramText(text)) {
     const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST", signal: AbortSignal.timeout(7000),
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: chunk })
+      body: JSON.stringify({ chat_id: chatId, text: chunk, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) })
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
@@ -2813,13 +2816,25 @@ async function startLiveKitOutboundCall({ phoneNumber, instruction, chatId, user
 
 // ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
-  const msg = req.body.message;
-
-  if (!msg) return res.sendStatus(200);
   if (!validWebhookSecret(req.get("X-Telegram-Bot-Api-Secret-Token"), telegramWebhookSecret)) {
     console.error("KUZYA_TELEGRAM_DELIVERY_REJECTED");
     return res.sendStatus(403);
   }
+  if (req.body.callback_query) {
+    const callback = req.body.callback_query;
+    let result;
+    try { result = await callApprovals.confirm(callback); }
+    catch { return res.sendStatus(503); }
+    console.log("KUZYA_CALL_APPROVAL_RESULT", { ok: result.ok, error: result.error || null, callId: result.callId || null });
+    try {
+      await fetch(`${TELEGRAM_API}/answerCallbackQuery`, { method: "POST", signal: AbortSignal.timeout(5000),
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callback_query_id: callback.id,
+          text: result.ok ? 'Память открыта для этого звонка. Скажи Кузе «готово».' : 'Кнопка недоступна или звонок завершён. Попроси Кузю прислать новую.', show_alert: !result.ok }) });
+    } catch { console.error("KUZYA_CALL_APPROVAL_NOTICE_FAILED"); }
+    return res.sendStatus(200);
+  }
+  const msg = req.body.message;
+  if (!msg) return res.sendStatus(200);
   let verifiedOwnerId;
   let enrolled = false;
   const enrollment = /^\/start\s+(bind_[A-Za-z0-9_-]{32})$/.exec(String(msg.text || '').trim());
@@ -2849,11 +2864,10 @@ app.post("/webhook", async (req, res) => {
 
     try {
       if (enrolled || isVoiceConnectionRequest(msg.text)) {
-        const code = voiceAccess.issue(userId);
-        // Always deliver the access code privately, even if requested in the workspace.
+        // No spoken code: the live call requests a call-specific private button.
         try {
-          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}Код для общей памяти в звонке: ${code}. Это одноразовый код, созданный мной; не нужно придумывать свой. Действует 5 минут и один раз. Позвони Кузе и скажи: «Мой код — ${code}». После этого телефон сможет читать нашу общую память и проверять интернет. После перезапуска сервиса нужен новый код.`);
-          console.log("KUZYA_VOICE_CODE_DELIVERED", { enrolled, messageId: msg.message_id });
+          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}Для общей памяти позвони на прежний номер Кузи и скажи «открой память». В этот личный чат придёт кнопка «Это я — открыть память». Нажми её во время своего звонка и скажи Кузе «готово». Диктовать коды не нужно. Подтверждение относится только к текущему звонку.`);
+          console.log("KUZYA_VOICE_BUTTON_HELP_DELIVERED", { enrolled, messageId: msg.message_id });
         } catch (error) {
           if (msg.chat.type === "private") throw error;
           let botLink = "";
@@ -2862,10 +2876,10 @@ app.post("/webhook", async (req, res) => {
             const bot = await response.json();
             if (response.ok && bot.ok && /^[A-Za-z0-9_]+$/.test(bot.result?.username || "")) botLink = ` https://t.me/${bot.result.username}?start=voice`;
           } catch { /* The fallback still explains how to open the private chat. */ }
-          await tgSendMessage(chatId, `Не получилось отправить код в личку. Открой мой профиль в Telegram, нажми «Начать» и отправь /voice в личном чате.${botLink}`);
+          await tgSendMessage(chatId, `Не получилось написать тебе в личку. Открой мой профиль в Telegram, нажми «Начать» и отправь /voice в личном чате.${botLink}`);
           return;
         }
-        if (msg.chat.type !== "private") await tgSendMessage(chatId, "Код отправлен тебе в личный чат со мной. Он действует 5 минут.");
+        if (msg.chat.type !== "private") await tgSendMessage(chatId, "Инструкция отправлена тебе в личный чат со мной. Подтверждение звонка — кнопкой, без диктовки кодов.");
         return;
       }
       // PHOTO
@@ -2924,7 +2938,7 @@ app.post("/webhook", async (req, res) => {
         const packet = await sharedStore.load({ userId });
         const time = value => new Date(value).toLocaleString('ru-UA', { timeZone: 'Europe/Kiev' }) + ' Киев';
         const model = modelHealth.lastError ? `Последняя ошибка: ${telegramFailureText(modelHealth.lastError)} (${time(modelHealth.lastError.at)}).` : modelHealth.lastSuccessAt ? `Последний успешный ответ модели: ${time(modelHealth.lastSuccessAt)}.` : "Модель в этом запуске ещё не проверена.";
-        await tgSendMessage(chatId, `Один Кузя: общее ядро подключено к Telegram, фотографиям и подтверждённому телефону. Основная модель: ${CHAT_MODEL}.\nTelegram: это сообщение принято от подтверждённого владельца.\nПамять: ${packet.unavailable.length ? 'часть сохранённой истории сейчас недоступна' : 'чтение доступно; история загружается в ограниченном объёме'}.\n${model}\nТелефон — тот же Кузя; личная память в звонке открывается по коду /voice. Этот статус не запускает звонок и не проверяет звонки вживую.`);
+        await tgSendMessage(chatId, `Один Кузя: общее ядро подключено к Telegram, фотографиям и подтверждённому телефону. Основная модель: ${CHAT_MODEL}.\nTelegram: это сообщение принято от подтверждённого владельца.\nПамять: ${packet.unavailable.length ? 'часть сохранённой истории сейчас недоступна' : 'чтение доступно; история загружается в ограниченном объёме'}.\n${model}\nТелефон — тот же Кузя; личная память в звонке открывается кнопкой в личном Telegram, без диктовки кодов. Этот статус не запускает звонок и не проверяет звонки вживую.`);
         return;
       }
 
@@ -4079,9 +4093,10 @@ app.post("/openai-realtime-webhook", async (req, res) => {
             if (!saved) throw new Error("voice observation was not saved");
           }
         });
+        callApprovals.open(callId, `Входящий звонок, номер заканчивается на ${String(incomingPhone || '').replace(/\D/g, '').slice(-4) || 'не определён'}`);
         attachRealtimeTools(observer.socket, makeVoiceTools(callId));
         inboundObservers.set(callId, observer);
-        observer.socket.once("close", () => { inboundObservers.delete(callId); voiceAccess.revoke(callId); });
+        observer.socket.once("close", () => { inboundObservers.delete(callId); callApprovals.close(callId); });
       } catch (error) {
         // Diagnostic failure must not reject or hang up an accepted phone call.
         console.error("KUZYA_INBOUND_OBSERVER_START_FAILED", { callId, message: error.message });
@@ -4104,6 +4119,7 @@ app.post("/openai-realtime-webhook", async (req, res) => {
 
 function makeVoiceTools(callId) {
   return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet, failureText: telegramFailureText,
+    requestAccess: () => callApprovals.request(callId),
     reason: async query => {
       const question = voiceAccess.redact(query);
       const result = await sharedAssistant.respond({ userId: OWNER_TELEGRAM_ID, text: question,
@@ -4127,10 +4143,12 @@ app.post("/internal/voice-tool", async (req, res) => {
   if (!validWebhookSecret(req.get("X-Kuzya-Internal"), internalToolSecret)) return res.sendStatus(403);
   const { callId, name, args } = req.body || {};
   if (typeof callId !== "string" || !/^livekit:[a-zA-Z0-9_-]{1,100}$/.test(callId)) return res.sendStatus(400);
+  if (name === 'close_access') { livekitToolHandlers.delete(callId); callApprovals.close(callId); return res.json({ ok: true }); }
   if (!livekitToolHandlers.has(callId)) {
     if (livekitToolHandlers.size >= 100) return res.status(429).json({ ok: false });
     livekitToolHandlers.set(callId, makeVoiceTools(callId));
-    const timer = setTimeout(() => { livekitToolHandlers.delete(callId); voiceAccess.revoke(callId); }, 45 * 60000); timer.unref?.();
+    callApprovals.open(callId, 'Исходящий телефонный разговор');
+    const timer = setTimeout(() => { livekitToolHandlers.delete(callId); callApprovals.close(callId); }, 45 * 60000); timer.unref?.();
   }
   try { res.json(await livekitToolHandlers.get(callId)(name, args || {})); }
   catch { res.status(503).json({ ok: false, error: "tool_unavailable" }); }
@@ -4150,7 +4168,7 @@ async function secureTelegramWebhook() {
   // Preserve the already configured destination, update delivery authentication only.
   const response = await fetch(`${TELEGRAM_API}/setWebhook`, { method: "POST", headers: { "Content-Type": "application/json" },
     signal: AbortSignal.timeout(5000), body: JSON.stringify({ url: info.result.url, secret_token: telegramWebhookSecret,
-      ...(info.result.allowed_updates ? { allowed_updates: info.result.allowed_updates } : {}),
+      allowed_updates: info.result.allowed_updates?.length ? [...new Set([...info.result.allowed_updates, 'message', 'callback_query'])] : [],
       ...(info.result.max_connections ? { max_connections: info.result.max_connections } : {}), drop_pending_updates: false }) });
   const result = await response.json();
   if (!response.ok || !result.ok) throw new Error("Telegram webhook registration failed");
@@ -4169,14 +4187,14 @@ async function checkModelCapabilities() {
   for (const item of cases) {
     try {
       const { answer } = await probe.respond({ userId: OWNER_TELEGRAM_ID, text: item.question, channel: item.channel });
-      const passed = !falseCapabilityDenial(answer) && (item.id === "incoming" ? /код|voice|памят/iu.test(answer) : /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer));
+      const passed = !falseCapabilityDenial(answer) && (item.id === "incoming" ? /кнопк/iu.test(answer) : /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer));
       console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id: item.id, core: SHARED_CORE_VERSION, passed, answer });
     } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id: item.id }); }
   }
 }
 
 // Liveness only: a billing error must not trigger a destructive restart loop.
-app.get("/health", (req, res) => res.set("Cache-Control", "no-store").json({ ok: true, version: RELIABILITY_VERSION, core: SHARED_CORE_VERSION }));
+app.get("/health", (req, res) => res.set("Cache-Control", "no-store").json({ ok: true, version: RELIABILITY_VERSION, core: SHARED_CORE_VERSION, phoneAccess: CALL_APPROVAL_VERSION }));
 
 // ---------- START ----------
 app.listen(PORT, () => {
