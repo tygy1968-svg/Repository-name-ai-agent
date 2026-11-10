@@ -1,10 +1,16 @@
+import { RELIABILITY_VERSION, GROUP_IDENTITY_HINT, telegramDecision, createTelegramQueue, createNoticeLimiter, splitTelegramText, telegramFailureText, isAccountError } from "./telegram-reliability.js";
 import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, falseCapabilityDenial, createContextStore, formatContext } from "./unified-context.js";
-import { isVoiceConnectionRequest, isOwnerTelegramMessage, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
+import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import express from "express";
 import crypto from "crypto";
 import { createOwnerIdentity, humanTelegramSender } from "./owner-identity.js";
 import { SipClient, AgentDispatchClient } from "livekit-server-sdk";
+
+// Every legacy integration is bounded too; explicit operation deadlines win.
+const fetch = (input, options = {}) => globalThis.fetch(input, {
+  ...options, signal: options.signal || AbortSignal.timeout(10000)
+});
 
 const app = express();
 app.use(express.json());
@@ -47,6 +53,9 @@ const sharedStore = createContextStore({ url: SUPABASE_URL, key: SUPABASE_KEY, f
 const voiceAccess = createVoiceAccess();
 const ownerIdentity = createOwnerIdentity({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const telegramWebhookSecret = webhookSecret(TELEGRAM_TOKEN);
+const telegramQueue = createTelegramQueue({ onError: () => console.error("KUZYA_TELEGRAM_JOB_FAILED") });
+const allowGroupHint = createNoticeLimiter();
+const modelHealth = { lastSuccessAt: null, lastError: null };
 const internalToolSecret = webhookSecret(SUPABASE_KEY);
 const searchConnectedInternet = query => searchInternet(query, { apiKey: process.env.SERP_API_KEY, fetchImpl: (...args) => fetch(...args) });
 console.log("KUZYA_CONTEXT_VERSION", "shared_context_2026_10_27");
@@ -63,19 +72,22 @@ const dialogState = {};
 
 // ---------- TELEGRAM ----------
 async function tgSendMessage(chatId, text) {
-  const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    signal: AbortSignal.timeout(7000),
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text })
-  });
-  const result = await response.json();
-  if (!response.ok || !result.ok) {
-    console.error("KUZYA_TELEGRAM_SEND_FAILED", { status: response.status, code: result.error_code,
-      reason: /chat not found/i.test(result.description || '') ? 'chat_not_found' : /blocked/i.test(result.description || '') ? 'bot_blocked' : 'other' });
-    throw new Error(`Telegram send failed: ${result.error_code || response.status}`);
+  let sent;
+  for (const chunk of splitTelegramText(text)) {
+    const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: "POST", signal: AbortSignal.timeout(7000),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: chunk })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      console.error("KUZYA_TELEGRAM_SEND_FAILED", { status: response.status, code: result.error_code,
+        reason: /chat not found/i.test(result.description || '') ? 'chat_not_found' : /blocked/i.test(result.description || '') ? 'bot_blocked' : 'other' });
+      throw new Error(`Telegram send failed: ${result.error_code || response.status}`);
+    }
+    sent = result.result;
   }
-  return result.result;
+  return sent;
 }
 
 // ---------- SUPABASE ----------
@@ -1137,7 +1149,7 @@ async function sbLogKuziaInteraction({
   nextAction = "",
   importance = 0,
   metadata = {},
-  requestTimeoutMs = null
+  requestTimeoutMs = 5000
 } = {}) {
   try {
     const payload = [
@@ -1554,7 +1566,7 @@ function getFactCategory(fact) {
 async function sbGetMemory(userId, limit = 15) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=neq.refuted&order=created_at.desc&limit=${limit}`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }, signal: AbortSignal.timeout(5000) }
   );
 
   if (!res.ok) return [];
@@ -1564,7 +1576,7 @@ async function sbGetMemory(userId, limit = 15) {
 async function sbGetIdentity(userId) {
   const res = await fetch(
     `${SUPABASE_MEMORY_URL}?user_id=eq.${userId}&type=eq.identity_core&limit=1`,
-    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }, signal: AbortSignal.timeout(5000) }
   );
 
   if (!res.ok) return null;
@@ -1829,25 +1841,29 @@ async function createEmbedding(text) {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
+    signal: AbortSignal.timeout(7000),
     body: JSON.stringify({ model: "text-embedding-3-small", input: text })
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error("Embedding error: " + err);
+    throw new Error(`Embedding HTTP ${res.status}`);
   }
 
   const data = await res.json();
   return data.data[0].embedding;
 }
 
-async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}) {
-  const res = await fetch(OPENAI_ENDPOINT, {
+async function openaiChat(messages, { temperature = 0.6, max_tokens = 300, timeoutMs = 20000 } = {}) {
+  let res;
+  try { res = await fetch(OPENAI_ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({ model: CHAT_MODEL, temperature, max_tokens, messages })
-  });
+  }); } catch (error) {
+    modelHealth.lastError = { code: ['TimeoutError', 'AbortError'].includes(error?.name) ? 'timeout' : 'network_unavailable', at: new Date().toISOString() };
+    throw error;
+  }
 
   if (!res.ok) {
     // Log only bounded machine-readable fields, never the raw body: API error
@@ -1857,11 +1873,19 @@ async function openaiChat(messages, { temperature = 0.6, max_tokens = 300 } = {}
     const safeField = value => typeof value === "string" && /^[a-z0-9_]{1,80}$/i.test(value) ? value : null;
     const details = { status: res.status, code: safeField(failure?.error?.code), type: safeField(failure?.error?.type) };
     console.error("KUZYA_OPENAI_CHAT_FAILED", details);
-    throw new Error(`OpenAI request failed: HTTP ${res.status}, code ${details.code || "unknown"}`);
+    modelHealth.lastError = { ...details, at: new Date().toISOString() };
+    throw Object.assign(new Error(`OpenAI request failed: HTTP ${res.status}, code ${details.code || "unknown"}`), details);
   }
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  const answer = data.choices?.[0]?.message?.content;
+  if (typeof answer !== "string" || !answer.trim()) {
+    modelHealth.lastError = { code: "empty_model_reply", at: new Date().toISOString() };
+    throw new Error("empty_model_reply");
+  }
+  modelHealth.lastSuccessAt = new Date().toISOString();
+  modelHealth.lastError = null;
+  return answer;
 }
 
 async function buildVoiceCallPlan({ phoneNumber, instruction }) {
@@ -2231,7 +2255,7 @@ async function extractFacts(userText) {
       },
       { role: "user", content: userText }
     ],
-    { temperature: 0, max_tokens: 120 }
+    { temperature: 0, max_tokens: 120, timeoutMs: 5000 }
   );
 
   try {
@@ -2531,7 +2555,10 @@ async function generateReply(userId, userText, memory, chatType = 'unknown') {
   try {
     const plan = await planStep(userText, formatContext(packet));
     if (plan.needs_web) web = await searchConnectedInternet(userText);
-  } catch { web = { ok: false, error: "search_planning_unavailable" }; }
+  } catch (error) {
+    if (isAccountError(error)) throw error;
+    web = { ok: false, error: "search_planning_unavailable" };
+  }
   const messages = [{ role: "system", content: `${CONTINUITY_RULES}
 ${channelCapabilities("Telegram", Boolean(process.env.SERP_API_KEY))}
 Сейчас канал Telegram. Подтверждены отправитель Юля и разрешённый чат Telegram.
@@ -2872,15 +2899,18 @@ app.post("/webhook", async (req, res) => {
     console.error("KUZYA_OWNER_BINDING_UNAVAILABLE");
     return res.sendStatus(503); // Telegram retries; no silent loss or memory access.
   }
-  const accepted = isOwnerTelegramMessage(msg, verifiedOwnerId);
-  console.log("KUZYA_TELEGRAM_UPDATE", { accepted, chatType: msg.chat?.type, messageId: msg.message_id });
-  if (!accepted) return res.sendStatus(200);
+  const decision = telegramDecision(msg, verifiedOwnerId);
+  console.log("KUZYA_TELEGRAM_UPDATE", { accepted: decision.accepted, reason: decision.reason, chatType: msg.chat?.type, messageId: msg.message_id });
+  if (!decision.accepted) {
+    res.sendStatus(200);
+    if (decision.hint && allowGroupHint()) {
+      tgSendMessage(msg.chat.id, GROUP_IDENTITY_HINT).catch(() => console.error("KUZYA_GROUP_HINT_FAILED"));
+    }
+    return;
+  }
   if (enrollment && !enrolled) return res.sendStatus(200); // Never pass a link token to the LLM/history.
 
-  // отвечаем Telegram сразу
-  res.sendStatus(200);
-
-  (async () => {
+  const queued = telegramQueue.submit(req.body, async () => {
     const { id: chatId } = msg.chat;
     // Historical storage namespace is retained; it is NOT an authenticated
     // Telegram identity (1087968824 is the anonymous group service sender).
@@ -2911,9 +2941,10 @@ app.post("/webhook", async (req, res) => {
       if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
 
-        const fileRes = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+        const fileRes = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`, { signal: AbortSignal.timeout(7000) });
         const fileData = await fileRes.json();
 
+        if (!fileRes.ok || !fileData.ok || !fileData.result?.file_path) throw new Error("telegram_photo_unavailable");
         const filePath = fileData.result.file_path;
         const imageUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`;
 
@@ -2922,7 +2953,7 @@ app.post("/webhook", async (req, res) => {
 
         await tgSendMessage(chatId, reply);
 
-        await sbLogKuziaInteraction({
+        const photoSaved = await sbLogKuziaInteraction({
           userId: "yulia",
           stimulus: "[Пользователь отправил фото]",
           response: reply,
@@ -2942,13 +2973,28 @@ app.post("/webhook", async (req, res) => {
           }
         });
 
+        if (!photoSaved) await tgSendMessage(chatId, "Ответ отправлен, но сохранить его в общую память сейчас не удалось. В другом канале этот разговор пока может быть недоступен.").catch(() => console.error("KUZYA_MEMORY_WARNING_FAILED"));
         return;
       }
 
       // TEXT
-      if (typeof msg.text !== "string") return;
+      if (typeof msg.text !== "string") {
+        await tgSendMessage(chatId, "Я получил вложение, но пока отвечаю здесь на текст и фотографии. Напиши сообщение текстом; для разговора по телефону напиши «подключи телефон».");
+        return;
+      }
 
       const text = msg.text.trim();
+      if (/^\/(?:start|help)(?:@\w+)?$/i.test(text)) {
+        await tgSendMessage(chatId, "Юль, это Кузя. Пиши мне здесь — личка и разрешённая рабочая группа используют одну память. В группе отправляй от своего профиля. Для общей памяти по телефону: /voice или «подключи телефон». /status — состояние подключения без обращения к модели. Исходящий звонок: /lktest +номер задача.");
+        return;
+      }
+      if (/^\/status(?:@\w+)?$/i.test(text)) {
+        const packet = await sharedStore.load({ userId });
+        const time = value => new Date(value).toLocaleString('ru-UA', { timeZone: 'Europe/Kiev' }) + ' Киев';
+        const model = modelHealth.lastError ? `Последняя ошибка: ${telegramFailureText(modelHealth.lastError)} (${time(modelHealth.lastError.at)}).` : modelHealth.lastSuccessAt ? `Последний успешный ответ модели: ${time(modelHealth.lastSuccessAt)}.` : "Модель в этом запуске ещё не проверена.";
+        await tgSendMessage(chatId, `Telegram: это сообщение принято от подтверждённого владельца.\nПамять: ${packet.unavailable.length ? 'часть сохранённой истории сейчас недоступна' : 'чтение доступно; история загружается в ограниченном объёме'}.\n${model}\nТелефон — тот же Кузя; личная память в звонке открывается по коду /voice. Этот статус не запускает звонок и не проверяет звонки вживую.`);
+        return;
+      }
 
       // --- LIVEKIT TEST CALL COMMAND ---
       if (text.startsWith("/lktest")) {
@@ -3391,20 +3437,11 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      const facts = await extractFacts(text);
-      console.log("Extracted facts:", facts);
-
-      if (facts.length > 0) {
-        const saves = await Promise.allSettled(facts.map(f => sbSaveFact(userId, f, { originalText: text, messageId: msg.message_id })));
-        if (saves.some(result => result.status === "rejected")) console.error("KUZYA_FACT_APPEND_FAILED");
-      }
-
-      const memory = await sbGetMemory(userId);
-      const reply = await generateReply(userId, text, memory, msg.chat.type);
+      const reply = await generateReply(userId, text, [], msg.chat.type);
 
       await tgSendMessage(chatId, reply);
 
-      await sbLogKuziaInteraction({
+      const saved = await sbLogKuziaInteraction({
         userId: "yulia",
         stimulus: text,
         response: reply,
@@ -3423,19 +3460,35 @@ app.post("/webhook", async (req, res) => {
         }
       });
 
-      await maybeWriteKuziaEvolutionFromTelegram({
+      console.log("KUZYA_TELEGRAM_REPLY_DELIVERED", { messageId: msg.message_id, characters: reply.length, memorySaved: saved });
+      if (!saved) await tgSendMessage(chatId, "Ответ отправлен, но сохранить его в общую память сейчас не удалось. В другом канале этот разговор пока может быть недоступен.").catch(() => console.error("KUZYA_MEMORY_WARNING_FAILED"));
+      if (/меня зовут|я живу|я предпочитаю|мой бренд|моя компания/iu.test(text)) {
+        // Optional enrichment never delays the delivered answer or overwrites history.
+        (async () => {
+          const facts = (await extractFacts(text)).filter(f => typeof f === "string").slice(0, 5);
+          const saves = await Promise.allSettled(facts.map(f => sbSaveFact(userId, f, { originalText: text, messageId: msg.message_id })));
+          if (saves.some(result => result.status === 'rejected')) console.error("KUZYA_OPTIONAL_FACTS_UNAVAILABLE");
+        })().catch(() => console.error("KUZYA_OPTIONAL_FACTS_UNAVAILABLE"));
+      }
+      maybeWriteKuziaEvolutionFromTelegram({
         userText: text,
         assistantReply: reply,
         telegramChatId: chatId,
         telegramUserId: userId,
         messageId: msg.message_id
-      });
+      }).catch(() => console.error("KUZYA_OPTIONAL_EVOLUTION_UNAVAILABLE"));
     } catch (e) {
-      console.error("handler error", e);
-      try { await tgSendMessage(chatId, "Не получилось обработать сообщение из-за технической ошибки."); }
+      console.error("KUZYA_TELEGRAM_HANDLER_FAILED", { status: e?.status || null, code: e?.code || null, name: e?.name || "Error" });
+      try { await tgSendMessage(chatId, telegramFailureText(e)); }
       catch { console.error("KUZYA_TELEGRAM_ERROR_REPLY_FAILED"); }
     }
-  })();
+  });
+  if (queued === "busy") {
+    console.error("KUZYA_TELEGRAM_QUEUE_BUSY");
+    return res.sendStatus(503); // Not claimed: Telegram can retry after capacity frees.
+  }
+  if (queued === "duplicate") console.log("KUZYA_TELEGRAM_DUPLICATE_IGNORED");
+  res.sendStatus(200);
 });
 
 // ---------- TWILIO VOICE (SAFE TWIML) ----------
@@ -4172,6 +4225,9 @@ async function checkModelCapabilities() {
   }
 }
 
+// Liveness only: a billing error must not trigger a destructive restart loop.
+app.get("/health", (req, res) => res.set("Cache-Control", "no-store").json({ ok: true, version: RELIABILITY_VERSION }));
+
 // ---------- START ----------
 app.listen(PORT, () => {
   console.log(`Кузя запущен на порту ${PORT}`);
@@ -4189,3 +4245,4 @@ app.listen(PORT, () => {
     })).catch(() => console.error("KUZYA_SHARED_CONTEXT_CHECK_FAILED"));
   }
 });
+
