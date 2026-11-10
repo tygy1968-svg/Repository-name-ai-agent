@@ -40,7 +40,7 @@ test('shared context works without embeddings, excludes refutations and model cl
 test('database outage is marked unavailable, not proof of empty memory', async () => {
   const store = createContextStore({ url: 'https://db.invalid', key: 'fake', fetchImpl: async () => new Response('', { status: 503 }) });
   const packet = await store.load({ userId: OWNER_TELEGRAM_ID });
-  assert.equal(packet.partial, true); assert.equal(packet.unavailable.length, 4);
+  assert.equal(packet.partial, true); assert.equal(packet.unavailable.length, 6);
 });
 
 test('fact write failure preserves prior data; missing embeddings still allow insertion', async () => {

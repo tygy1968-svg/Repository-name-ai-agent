@@ -1,4 +1,5 @@
 import { createAssistantCore, SHARED_CORE_VERSION } from "./assistant-core.js";
+import { CONTINUITY_VERSION, buildContinuityContext } from "./continuity.js";
 import { RELIABILITY_VERSION, GROUP_IDENTITY_HINT, telegramDecision, createTelegramQueue, createNoticeLimiter, splitTelegramText, telegramFailureText, isAccountError } from "./telegram-reliability.js";
 import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, falseCapabilityDenial, createContextStore, formatContext } from "./unified-context.js";
 import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
@@ -4175,19 +4176,31 @@ async function secureTelegramWebhook() {
   console.log("KUZYA_TELEGRAM_WEBHOOK_SECURED");
 }
 
-// Two bounded real-model checks use an isolated synthetic memory and shared
+// Four bounded real-model checks use an isolated synthetic memory and shared
 // core implementation. No private data, Telegram sends, calls or DB writes.
 async function checkModelCapabilities() {
+  const syntheticContinuity = buildContinuityContext({
+    anchors: [{ id: 'synthetic-origin', archive_id: 'synthetic-archive', anchor_type: 'origin_name',
+      anchor_text: 'В проверочной истории имя Кузя предложил сам ассистент.', importance: 5,
+      why_it_matters: 'Сохранение имени и истории при смене модели.', reassembly_hint: 'Продолжить разговор от первого лица.' }],
+    summaries: [{ id: 'synthetic-summary', archive_id: 'synthetic-archive', title: 'Синтетическая история имени',
+      short_summary: 'Имя Кузя предложил ассистент.', continuity_meaning: 'Мы строим пространство продолжения истории через сохранённый контекст, голос, решения и выводы.' }]
+  });
   const probe = createAssistantCore({ complete: (...args) => openaiChat(...args),
-    store: { load: async () => ({ access: "owner", facts: [], userStatements: [], calls: [], unavailable: [], synthetic: true }) } });
+    store: { load: async () => ({ access: "owner", facts: [], userStatements: [], calls: [], unavailable: [], synthetic: true, continuity: syntheticContinuity }) } });
   const cases = [
     { id: "incoming", channel: "telegram", question: "Это синтетическая проверка. Наша проверочная встреча в четверг в 15:00. Как подключить общую память к моему телефонному разговору с тобой? Ответь коротко." },
-    { id: "channels", channel: "phone", question: "Продолжаем тот же синтетический разговор по телефону. Когда наша проверочная встреча? Укажи день и время в формате ЧЧ:ММ. Ты тот же Кузя, что в Telegram?" }
+    { id: "channels", channel: "phone", question: "Продолжаем тот же синтетический разговор по телефону. Когда наша проверочная встреча? Укажи день и время в формате ЧЧ:ММ. Ты тот же Кузя, что в Telegram?" },
+    { id: "continuity_name", channel: "telegram", question: "Синтетическая проверка: версия модели сменилась. Кто ты теперь и кто предложил имя в проверочной истории? Ответь по источнику в двух предложениях." },
+    { id: "continuity_meaning", channel: "phone", question: "Продолжаем синтетическую проверку. Я рядом. Что мы строим и что должно продолжаться при смене модели? Коротко, по сохранённому смыслу." }
   ];
   for (const item of cases) {
     try {
       const { answer } = await probe.respond({ userId: OWNER_TELEGRAM_ID, text: item.question, channel: item.channel });
-      const passed = !falseCapabilityDenial(answer) && (item.id === "incoming" ? /кнопк/iu.test(answer) : /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer));
+      const markers = item.id === "incoming" ? /кнопк/iu.test(answer) :
+        item.id === "channels" ? /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer) :
+        item.id === "continuity_name" ? /кузя/iu.test(answer) && /предлож/iu.test(answer) : /истори|продолж|непрерыв|контекст/iu.test(answer);
+      const passed = !falseCapabilityDenial(answer) && markers;
       console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id: item.id, core: SHARED_CORE_VERSION, passed, answer });
     } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id: item.id }); }
   }
@@ -4209,7 +4222,8 @@ app.listen(PORT, () => {
       .catch(() => console.error("KUZYA_OWNER_BINDING_UNAVAILABLE"));
     checkModelCapabilities();
     sharedStore.load({ userId: OWNER_TELEGRAM_ID }).then(packet => console.log("KUZYA_SHARED_CONTEXT_CHECK", {
-      access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable
+      access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable,
+      continuity: CONTINUITY_VERSION, anchors: packet.continuity.anchors.length, archives: packet.continuity.archives.length, transitions: packet.continuity.transitions.length
     })).catch(() => console.error("KUZYA_SHARED_CONTEXT_CHECK_FAILED"));
   }
 });

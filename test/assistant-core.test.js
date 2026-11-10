@@ -76,7 +76,8 @@ test('simultaneous requests from phone and Telegram cannot overwrite each other'
 
 test('voice rules keep greetings and authorization local, substantive work in the common core', () => {
   assert.match(VOICE_CORE_RULES, /ask_kuzya/); assert.match(VOICE_CORE_RULES, /askKuzya/);
-  assert.match(VOICE_CORE_RULES, /Код подтверждения.*только authenticate_owner/);
+  assert.match(VOICE_CORE_RULES, /request_owner_access\/requestOwnerAccess/);
+  assert.doesNotMatch(VOICE_CORE_RULES, /authenticate_owner\/authenticateOwner/);
 });
 
 test('web lookup uses only a planned public query, never the full private conversation', async () => {
