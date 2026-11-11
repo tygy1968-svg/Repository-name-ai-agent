@@ -714,8 +714,8 @@ export default defineAgent({
     ctx.room.once('disconnected', () => { ownerAuthenticated = false; invokeChannelTool("close_access", {}).catch(() => {}); });
     const channelTools = {
       requestOwnerAccess: llm.tool({ description: "Запросить кнопку подтверждения текущего звонка в личном Telegram Юли, без диктовки кодов. После нажатия проверить доступ повторным вызовом.", parameters: z.object({}), execute: args => invokeChannelTool("request_owner_access", args) }),
-      readSharedContext: llm.tool({ description: "Прочитать общую память после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("read_shared_context", args) }),
-      askKuzya: llm.tool({ description: "Обратиться к тому же общему ядру Кузи, что отвечает в Telegram. После подтверждения Юли используй перед содержательным ответом; код сюда не передавай.", parameters: z.object({ query: z.string().max(2000) }), execute: args => invokeChannelTool("ask_kuzya", args) }),
+      readSharedContext: llm.tool({ description: "Только для явного просмотра исходных записей после подтверждения Юли. Для обычного ответа используй один askKuzya, который сам читает память; не вызывай оба подряд.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("read_shared_context", args) }),
+      askKuzya: llm.tool({ description: "Получить ответ общего ядра Telegram и телефона после подтверждения Юли. Сам читает память и при необходимости проверяет интернет, без предварительного readSharedContext. Скажи коротко «Секунду, проверю» и сразу вызови инструмент. Ответ передай от первого лица в мужском роде.", parameters: z.object({ query: z.string().max(2000) }), execute: args => invokeChannelTool("ask_kuzya", args) }),
       searchInternet: llm.tool({ description: "Проверить свежие сведения в интернете после подтверждения Юли.", parameters: z.object({ query: z.string() }), execute: args => invokeChannelTool("search_internet", args) })
     };
 
