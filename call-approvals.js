@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-export const CALL_APPROVAL_VERSION = 'telegram_call_button_2026_11_10';
+export const CALL_APPROVAL_VERSION = 'telegram_call_button_auto_2026_11_11';
 // Process-local, call-specific approval. Caller ID never grants access.
 export function createCallApprovals({ access, loadOwner, send, now = Date.now, randomToken = () => crypto.randomBytes(16).toString('hex') }) {
   const calls = new Map();

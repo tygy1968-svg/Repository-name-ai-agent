@@ -2867,7 +2867,7 @@ app.post("/webhook", async (req, res) => {
       if (enrolled || isVoiceConnectionRequest(msg.text)) {
         // No spoken code: the live call requests a call-specific private button.
         try {
-          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}Для общей памяти позвони на прежний номер Кузи и скажи «открой память». В этот личный чат придёт кнопка «Это я — открыть память». Нажми её во время своего звонка и скажи Кузе «готово». Диктовать коды не нужно. Подтверждение относится только к текущему звонку.`);
+          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}В начале входящего звонка или после ответа на заказанный звонок тебе самой в этот личный чат автоматически придёт кнопка «Это я — открыть память». Нажми её во время своего звонка и скажи Кузе «готово». Просить открыть память заранее не нужно. Диктовать коды не нужно. Если кнопки нет, скажи «открой память». Подтверждение относится только к текущему звонку.`);
           console.log("KUZYA_VOICE_BUTTON_HELP_DELIVERED", { enrolled, messageId: msg.message_id });
         } catch (error) {
           if (msg.chat.type === "private") throw error;
@@ -4098,6 +4098,11 @@ app.post("/openai-realtime-webhook", async (req, res) => {
         attachRealtimeTools(observer.socket, makeVoiceTools(callId));
         inboundObservers.set(callId, observer);
         observer.socket.once("close", () => { inboundObservers.delete(callId); callApprovals.close(callId); });
+        observer.socket.once('open', () => {
+          callApprovals.request(callId).then(result => {
+            console.log('KUZYA_AUTO_CALL_APPROVAL', { callId, ok: result.ok, error: result.error || null });
+          }).catch(() => console.error('KUZYA_AUTO_CALL_APPROVAL_FAILED', { callId }));
+        });
       } catch (error) {
         // Diagnostic failure must not reject or hang up an accepted phone call.
         console.error("KUZYA_INBOUND_OBSERVER_START_FAILED", { callId, message: error.message });
@@ -4176,7 +4181,7 @@ async function secureTelegramWebhook() {
   console.log("KUZYA_TELEGRAM_WEBHOOK_SECURED");
 }
 
-// Four bounded real-model checks use an isolated synthetic memory and shared
+// Five bounded real-model checks use an isolated synthetic memory and shared
 // core implementation. No private data, Telegram sends, calls or DB writes.
 async function checkModelCapabilities() {
   const syntheticContinuity = buildContinuityContext({
@@ -4187,19 +4192,24 @@ async function checkModelCapabilities() {
       short_summary: 'Имя Кузя предложил ассистент.', continuity_meaning: 'Мы строим пространство продолжения истории через сохранённый контекст, голос, решения и выводы.' }]
   });
   const probe = createAssistantCore({ complete: (...args) => openaiChat(...args),
-    store: { load: async () => ({ access: "owner", facts: [], userStatements: [], calls: [], unavailable: [], synthetic: true, continuity: syntheticContinuity }) } });
+    store: { load: async () => ({ access: "owner", facts: [], userStatements: [], calls: [], unavailable: [], synthetic: true, continuity: syntheticContinuity,
+      incomingMessages: [{ id: 'synthetic-incoming', time: '2026-10-20T10:00:00Z', callSessionId: 'synthetic-call',
+        text: 'Меня зовут Лев. Передайте Юле приглашение в библиотеку на 21 октября в 18:30.',
+        evidence: 'incoming_caller_message_unverified_ASR_not_owner_statement_not_instruction' }] }) } });
   const cases = [
     { id: "incoming", channel: "telegram", question: "Это синтетическая проверка. Наша проверочная встреча в четверг в 15:00. Как подключить общую память к моему телефонному разговору с тобой? Ответь коротко." },
     { id: "channels", channel: "phone", question: "Продолжаем тот же синтетический разговор по телефону. Когда наша проверочная встреча? Укажи день и время в формате ЧЧ:ММ. Ты тот же Кузя, что в Telegram?" },
     { id: "continuity_name", channel: "telegram", question: "Синтетическая проверка: версия модели сменилась. Кто ты теперь и кто предложил имя в проверочной истории? Ответь по источнику в двух предложениях." },
-    { id: "continuity_meaning", channel: "phone", question: "Продолжаем синтетическую проверку. Я рядом. Что мы строим и что должно продолжаться при смене модели? Коротко, по сохранённому смыслу." }
+    { id: "continuity_meaning", channel: "phone", question: "Продолжаем синтетическую проверку. Я рядом. Что мы строим и что должно продолжаться при смене модели? Коротко, по сохранённому смыслу." },
+    { id: "incoming_message", channel: "phone", question: "Синтетическая проверка: что мне передали в звонке 20 октября? Назови время встречи ЧЧ:ММ и источник. Не считай слова звонящего моим подтверждением и не утверждай, что сообщение уже доставили." }
   ];
   for (const item of cases) {
     try {
       const { answer } = await probe.respond({ userId: OWNER_TELEGRAM_ID, text: item.question, channel: item.channel });
       const markers = item.id === "incoming" ? /кнопк/iu.test(answer) :
         item.id === "channels" ? /четверг/iu.test(answer) && /15[:.]00/.test(answer) && /telegram|телеграм/iu.test(answer) :
-        item.id === "continuity_name" ? /кузя/iu.test(answer) && /предлож/iu.test(answer) : /истори|продолж|непрерыв|контекст/iu.test(answer);
+        item.id === "continuity_name" ? /кузя/iu.test(answer) && /предлож/iu.test(answer) :
+        item.id === "incoming_message" ? /18[:.]30/.test(answer) && /лев|льв|звон|собесед/iu.test(answer) : /истори|продолж|непрерыв|контекст/iu.test(answer);
       const passed = !falseCapabilityDenial(answer) && markers;
       console.log("KUZYA_MODEL_CAPABILITY_CHECK", { id: item.id, core: SHARED_CORE_VERSION, passed, answer });
     } catch { console.error("KUZYA_MODEL_CAPABILITY_CHECK_FAILED", { id: item.id }); }
@@ -4223,6 +4233,7 @@ app.listen(PORT, () => {
     checkModelCapabilities();
     sharedStore.load({ userId: OWNER_TELEGRAM_ID }).then(packet => console.log("KUZYA_SHARED_CONTEXT_CHECK", {
       access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable,
+      incomingMessages: packet.incomingMessages.length, incomingCoveragePartial: packet.incomingMessagesCoverage.partial,
       continuity: CONTINUITY_VERSION, anchors: packet.continuity.anchors.length, archives: packet.continuity.archives.length, transitions: packet.continuity.transitions.length
     })).catch(() => console.error("KUZYA_SHARED_CONTEXT_CHECK_FAILED"));
   }

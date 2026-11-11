@@ -1,5 +1,5 @@
 import { VOICE_CORE_RULES } from './assistant-core.js';
-import { CONTINUITY_RULES, channelCapabilities } from "./unified-context.js";
+import { OWNER_TELEGRAM_ID, CONTINUITY_RULES, channelCapabilities } from "./unified-context.js";
 import { webhookSecret } from "./channel-tools.js";
 import { cli, defineAgent, llm, ServerOptions, voice } from "@livekit/agents";
 import * as openai from "@livekit/agents-plugin-openai";
@@ -1065,6 +1065,14 @@ export default defineAgent({
       room: ctx.room,
       agent: new KuzyaAgent(initialCtx, runtimeInstructions, { endCall, ...channelTools })
     });
+
+    // Send only after an answered owner-requested call to herself, not while
+    // ringing or when she asked to call someone else. This never grants access.
+    if (metadata.source === 'telegram-lkcall' && String(metadata.userId) === OWNER_TELEGRAM_ID &&
+        String(callSession?.telegram_user_id) === OWNER_TELEGRAM_ID && metadata.voiceCallPlan?.recipient === 'yulia') {
+      const result = await invokeChannelTool('request_owner_access', {});
+      console.log('KUZYA_AUTO_CALL_APPROVAL', { callId: voiceToolCallId, ok: result.ok, error: result.error || null });
+    }
 
     await sbLogKuziaInteraction({
       stimulus: "After waitForSipActive.",
