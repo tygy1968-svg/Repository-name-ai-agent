@@ -12,8 +12,13 @@
   "dependencies": {
     "@livekit/agents": "1.9.4",
     "@livekit/agents-plugin-openai": "1.9.4",
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
     "express": "^4.18.2",
+    "ipaddr.js": "2.5.0",
+    "jose": "5.10.0",
     "livekit-server-sdk": "^2.15.2",
+    "standardwebhooks": "1.1.1",
     "ws": "8.22.0",
     "zod": "4.6.6"
   }
