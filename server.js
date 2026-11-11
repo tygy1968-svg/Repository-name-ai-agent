@@ -6,6 +6,7 @@ import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoic
 import { createCallApprovals, CALL_APPROVAL_VERSION } from "./call-approvals.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
 import { probeVoiceStyle } from "./voice-style-probe.js";
+import { createIncomingMessageInbox } from "./incoming-message-inbox.js";
 import express from "express";
 import crypto from "crypto";
 import { createOwnerIdentity, humanTelegramSender } from "./owner-identity.js";
@@ -55,6 +56,7 @@ const SUPABASE_CHAT_ARCHIVE_ANCHORS_URL = `${SUPABASE_URL}/rest/v1/chat_archive_
 const KUZYA_CORE = CONTINUITY_RULES;
 const sharedStore = createContextStore({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const voiceAccess = createVoiceAccess();
+const incomingMessageInbox = createIncomingMessageInbox({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const ownerIdentity = createOwnerIdentity({ url: SUPABASE_URL, key: SUPABASE_KEY, fetchImpl: (...args) => fetch(...args) });
 const callApprovals = createCallApprovals({ access: voiceAccess, loadOwner: () => ownerIdentity.load(), send: tgSendMessage });
 console.log("KUZYA_CALL_APPROVAL_CONFIG", CALL_APPROVAL_VERSION);
@@ -2868,7 +2870,7 @@ app.post("/webhook", async (req, res) => {
       if (enrolled || isVoiceConnectionRequest(msg.text)) {
         // No spoken code: the live call requests a call-specific private button.
         try {
-          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}В начале входящего звонка или после ответа на заказанный звонок тебе самой в этот личный чат автоматически придёт кнопка «Это я — открыть память». Нажми её во время своего звонка и скажи Кузе «готово». Просить открыть память заранее не нужно. Диктовать коды не нужно. Если кнопки нет, скажи «открой память». Подтверждение относится только к текущему звонку.`);
+          await tgSendMessage(verifiedOwnerId, `${enrolled ? 'Твой личный Telegram подключён. ' : ''}При звонке с номера прежнего подтверждённого разговора или после ответа на заказанный звонок тебе самой в этот личный чат придёт кнопка «Это я — открыть память». Нажми её во время своего звонка и скажи Кузе «готово». Просить открыть память заранее не нужно. Диктовать коды не нужно. Если кнопки нет, скажи «открой память». Подтверждение относится только к текущему звонку.`);
           console.log("KUZYA_VOICE_BUTTON_HELP_DELIVERED", { enrolled, messageId: msg.message_id });
         } catch (error) {
           if (msg.chat.type === "private") throw error;
@@ -4096,11 +4098,13 @@ app.post("/openai-realtime-webhook", async (req, res) => {
           }
         });
         callApprovals.open(callId, `Входящий звонок, номер заканчивается на ${String(incomingPhone || '').replace(/\D/g, '').slice(-4) || 'не определён'}`);
-        attachRealtimeTools(observer.socket, makeVoiceTools(callId));
+        attachRealtimeTools(observer.socket, makeVoiceTools(callId, { callSessionId: inboundLink?.inbound?.id, normalizedPhone: normalizePhoneForMemory(incomingPhone) }));
         inboundObservers.set(callId, observer);
         observer.socket.once("close", () => { inboundObservers.delete(callId); callApprovals.close(callId); });
         observer.socket.once('open', () => {
-          callApprovals.request(callId).then(result => {
+          incomingMessageInbox.isOwnerPhoneHint(incomingPhone).then(async known => {
+            if (!known) { console.log('KUZYA_CALLER_MODE', { callId, ownerButton: false }); return; }
+            const result = await callApprovals.request(callId);
             console.log('KUZYA_AUTO_CALL_APPROVAL', { callId, ok: result.ok, error: result.error || null });
           }).catch(() => console.error('KUZYA_AUTO_CALL_APPROVAL_FAILED', { callId }));
         });
@@ -4124,9 +4128,23 @@ app.post("/openai-realtime-webhook", async (req, res) => {
   }
 });
 
-function makeVoiceTools(callId) {
+function makeVoiceTools(callId, sessionInfo = {}) {
   return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet, failureText: telegramFailureText,
     requestAccess: () => callApprovals.request(callId),
+    saveMessage: async ({ message, callerName }) => {
+      const receipt = await incomingMessageInbox.save({ callId, callSessionId: sessionInfo.callSessionId || callId.replace(/^livekit:/, ''),
+        normalizedPhone: sessionInfo.normalizedPhone, ownerAuthenticated: voiceAccess.has(callId), message, callerName });
+      if (!receipt.ok || receipt.duplicate) return receipt;
+      let notified = false;
+      try {
+        const owner = await ownerIdentity.load();
+        if (owner) {
+          const sent = await tgSendMessage(owner, `Сообщение из звонка${callerName ? ` — собеседник представился: ${callerName}` : ''}.\n${message}\n\nСохранено: ${receipt.recordedAt}. Личность звонящего не подтверждена. Это сообщение, а не выполненное поручение.`);
+          notified = Boolean(sent?.message_id);
+        }
+      } catch { console.error('KUZYA_CALLER_MESSAGE_NOTICE_FAILED', { callId }); }
+      return { ...receipt, notified, instruction: notified ? 'Сообщение сохранено, уведомление отправлено Юле. Это не означает, что она его прочитала.' : 'Сообщение сохранено. Отправка уведомления сейчас не подтверждена; не обещай, что Юля уже его получила или прочитала.' };
+    },
     reason: async query => {
       const requestedAt = Date.now();
       const question = voiceAccess.redact(query);

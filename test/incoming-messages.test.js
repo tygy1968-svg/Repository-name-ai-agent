@@ -12,7 +12,7 @@ test('dated incoming message reaches the owner inbox without impersonating owner
     const u = new URL(url); reads.push(u);
     if (u.searchParams.get('channel') === 'eq.inbound_call') {
       assert.equal(u.searchParams.get('user_id'), 'eq.yulia');
-      assert.equal(u.searchParams.get('event_type'), 'eq.voice_user_transcript');
+      assert.equal(u.searchParams.get('event_type'), 'in.(voice_user_transcript,caller_message_saved)');
       assert.equal(u.searchParams.get('call_session_id'), 'not.is.null');
       assert.equal(u.searchParams.get('and'), '(timestamp.gte.2026-11-06T22:00:00.000Z,timestamp.lt.2026-11-07T22:00:00.000Z)');
       return Response.json([original, { ...original, id: 'bad', channel: 'telegram' }, { ...original, id: 'assistant', event_type: 'voice_assistant_transcript' },

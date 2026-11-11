@@ -64,10 +64,10 @@ test('delivery failure and a call closing during delivery never create an access
   assert.equal(h.access.has('a'), false);
 });
 
-test('memory tools request button before reads and report actual access after owner clicks', async () => {
+test('memory tools deny strangers without a button and allow reads and report actual access after owner clicks', async () => {
   const h = fixture(); h.approvals.open('a'); let reads = 0;
   const handler = createVoiceToolHandler({ callId: 'a', access: h.access, store: { load: async () => { reads++; return {}; } }, requestAccess: () => h.approvals.request('a') });
-  assert.equal((await handler('read_shared_context', {})).approvalPending, true); assert.equal(reads, 0);
+  assert.equal((await handler('read_shared_context', {})).error, 'owner_authentication_required'); assert.equal(reads, 0); 
   assert.equal((await handler('request_owner_access', {})).authenticated, false);
   await h.approvals.confirm(h.callback());
   assert.equal((await handler('request_owner_access', {})).authenticated, true);

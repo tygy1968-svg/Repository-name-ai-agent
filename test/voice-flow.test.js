@@ -61,17 +61,19 @@ test('realtime style probe is bounded, text-only, deduplicated and cannot execut
   const h = probeFixture();
   h.response('one', 'Привет! Рад тебя слышать.'); h.response('one', 'Дубль не должен сдвинуть сценарий.');
   h.response('two', 'Слушаю.'); h.response('three', 'Так, готовий продовжити.');
+  h.response('four', 'Да, конечно, можешь оставить сообщение.');
+  h.event({ type: 'response.done', response: { id: 'five', status: 'completed', output: [{ type: 'function_call', name: 'leave_message', arguments: JSON.stringify({ message: 'Встреча 14 ноября в 17 часов' }) }] } });
   const result = await h.promise;
-  assert.equal(result.ok, true); assert.equal(result.results.length, 3); assert.equal(h.socket.closed, true);
+  assert.equal(result.ok, true); assert.equal(result.results.length, 5); assert.equal(h.socket.closed, true);
   assert.equal(h.socket.url, 'wss://api.openai.com/v1/realtime?model=gpt-realtime');
-  assert(h.socket.sent.filter(e => e.type === 'response.create').every(e => e.response.tool_choice === 'none' && e.response.max_output_tokens === 128));
+  assert(h.socket.sent.filter(e => e.type === 'response.create').every((e, i) => e.response.tool_choice === (i === 4 ? 'auto' : 'none') && e.response.max_output_tokens === 128));
   assert(h.socket.sent.filter(e => e.type === 'response.create').every(e => e.response.output_modalities[0] === 'text'));
-  assert.equal(h.socket.sent.filter(e => e.type === 'response.create').length, 3);
+  assert.equal(h.socket.sent.filter(e => e.type === 'response.create').length, 5);
   assert.doesNotMatch(JSON.stringify(result), /fake-never-output/);
 });
 
 test('feminine wording, API failures and timeouts cannot be reported as a successful voice check', async () => {
-  const feminine = probeFixture(); feminine.response('one', 'Рада тебя слышать.'); feminine.response('two', 'Привет ещё раз.'); feminine.response('three', 'Так, готова.');
+  const feminine = probeFixture(); feminine.response('one', 'Рада тебя слышать.'); feminine.response('two', 'Привет ещё раз.'); feminine.response('three', 'Так, готова.'); feminine.response('four', 'Нажми кнопку.'); feminine.response('five', 'Я записал без инструмента.');
   assert.equal((await feminine.promise).ok, false);
   const failure = probeFixture(); failure.event({ type: 'error', error: { message: 'fake-never-output' } });
   assert.deepEqual(await failure.promise, { ok: false, error: 'probe_api_error', results: [] });
