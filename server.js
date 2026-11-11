@@ -5,6 +5,7 @@ import { OWNER_TELEGRAM_ID, OWNER_ID, CONTINUITY_RULES, channelCapabilities, fal
 import { isVoiceConnectionRequest, webhookSecret, validWebhookSecret, createVoiceAccess, VOICE_TOOLS, createVoiceToolHandler, attachRealtimeTools, searchInternet } from "./channel-tools.js";
 import { createCallApprovals, CALL_APPROVAL_VERSION } from "./call-approvals.js";
 import { buildInboundInstructions, matchingPendingCall, observeRealtimeCall } from "./inbound-voice.js";
+import { probeVoiceStyle } from "./voice-style-probe.js";
 import express from "express";
 import crypto from "crypto";
 import { createOwnerIdentity, humanTelegramSender } from "./owner-identity.js";
@@ -4127,14 +4128,17 @@ function makeVoiceTools(callId) {
   return createVoiceToolHandler({ callId, access: voiceAccess, store: sharedStore, search: searchConnectedInternet, failureText: telegramFailureText,
     requestAccess: () => callApprovals.request(callId),
     reason: async query => {
+      const requestedAt = Date.now();
       const question = voiceAccess.redact(query);
       const result = await sharedAssistant.respond({ userId: OWNER_TELEGRAM_ID, text: question,
         channel: "phone", authorize: () => voiceAccess.has(callId) });
       if (!voiceAccess.has(callId)) return { ok: false, error: "owner_authentication_required" };
+      const auditStartedAt = Date.now();
       const memorySaved = await sbLogKuziaInteraction({ userId: OWNER_ID, channel: "voice_core", direction: "internal", eventType: "shared_core_reply",
         stimulus: question, response: result.answer, summary: "Ответ общего ядра в телефонный инструмент; произнесение не подтверждено.",
         metadata: { ownerAuthenticated: true, openaiCallId: callId, core: SHARED_CORE_VERSION, delivery: "tool_result_not_proof_of_spoken_delivery" }, requestTimeoutMs: 5000 });
       console.log("KUZYA_SHARED_CORE_PHONE_RESULT", { callId, memorySaved });
+      console.log('KUZYA_PHONE_TIMING', JSON.stringify({ callId, ...result.timings, memoryAuditMs: Date.now() - auditStartedAt, backendMs: Date.now() - requestedAt }));
       return { ok: true, ...result, memorySaved, instruction: memorySaved ? "Передай ответ от первого лица; это тот же Кузя." : "Передай ответ; предупреди, что сейчас его не удалось сохранить для другого канала." };
     },
     onResult: async result => {
@@ -4231,6 +4235,10 @@ app.listen(PORT, () => {
     ownerIdentity.load().then(id => console.log("KUZYA_OWNER_BINDING_CHECK", { configured: Boolean(id) }))
       .catch(() => console.error("KUZYA_OWNER_BINDING_UNAVAILABLE"));
     checkModelCapabilities();
+    probeVoiceStyle({ apiKey: OPENAI_API_KEY, model: REALTIME_MODEL,
+      instructions: buildInboundInstructions({ core: KUZYA_CORE }), tools: VOICE_TOOLS })
+      .then(result => console.log('KUZYA_VOICE_STYLE_PROBE', JSON.stringify({ model: REALTIME_MODEL, ...result })))
+      .catch(() => console.error('KUZYA_VOICE_STYLE_PROBE_FAILED'));
     sharedStore.load({ userId: OWNER_TELEGRAM_ID }).then(packet => console.log("KUZYA_SHARED_CONTEXT_CHECK", {
       access: packet.access, facts: packet.facts.length, statements: packet.userStatements.length, calls: packet.calls.length, unavailable: packet.unavailable,
       incomingMessages: packet.incomingMessages.length, incomingCoveragePartial: packet.incomingMessagesCoverage.partial,
