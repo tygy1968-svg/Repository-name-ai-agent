@@ -9,11 +9,13 @@ import { join } from 'node:path';
 import { createDotMcpRouter } from '../bridge/mcp-router.js';
 import { createTaskQueue } from '../bridge/task-queue.js';
 import { createJsonStore } from '../bridge/json-store.js';
+import { createDotEvents, createSecretVault } from '../bridge/events.js';
 
 const resourceUrl = 'https://bridge.example/dot/mcp';
-async function fixture(t) {
+async function fixture(t, withEvents = false) {
   const dir = await mkdtemp(join(tmpdir(), 'kuzya-mcp-'));
-  const queue = createTaskQueue({ store: createJsonStore(join(dir, 'state.json')) });
+  const store = createJsonStore(join(dir, 'state.json'));
+  const queue = createTaskQueue({ store });
   const principals = new Map([
     ['owner-token', { ownerId: 'owner', workerId: 'dot', scopes: ['kuzya.tasks'] }],
     ['other-token', { ownerId: 'other', workerId: 'other-dot', scopes: ['kuzya.tasks'] }],
@@ -22,7 +24,11 @@ async function fixture(t) {
   ]);
   let reads = 0, checks = 0;
   const app = express();
+  const events = withEvents ? createDotEvents({ store, vault: createSecretVault(Buffer.alloc(32, 3)),
+    canDeliver: async () => true, post: async (_url, request) => ({ ok: true, status: 200,
+      body: JSON.stringify({ challenge: JSON.parse(request.body).challenge }) }) }) : undefined;
   app.use(createDotMcpRouter({ queue, resourceUrl, authorizationServer: 'https://identity.example',
+    events,
     authenticate: async token => { checks++; return principals.get(token); },
     readContext: async ({ ownerId }) => { reads++; return { ownerId, partial: true, source: 'synthetic' }; } }));
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -107,4 +113,21 @@ test('MCP router cannot start with missing verifier or non-HTTPS identity/resour
   assert.throws(() => createDotMcpRouter({ ...config, authenticate: null }), /verified_auth/);
   assert.throws(() => createDotMcpRouter({ ...config, resourceUrl: 'http://bridge.example/mcp' }), /https_url/);
   assert.throws(() => createDotMcpRouter({ ...config, authorizationServer: 'https://user:pass@identity.example' }), /https_url/);
+});
+
+test('HTTP MCP advertises persistent events only with its adapter and performs authenticated subscription lifecycle', async t => {
+  const h = await fixture(t, true);
+  const init = await h.rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic-events', version: '1' } });
+  assert.deepEqual(init.data.result.capabilities.events, {});
+  const list = await h.rpc('events/list');
+  assert.equal(list.data.result.events[0].name, 'kuzya.task.created');
+  const args = { name: 'kuzya.task.created', arguments: {}, delivery: { mode: 'webhook', url: 'https://callback.example/events', secret: 'whsec_' + Buffer.alloc(32, 9).toString('base64') } };
+  const sub = await h.rpc('events/subscribe', args);
+  assert.equal(sub.status, 200); assert(sub.data.result.id.startsWith('sub_'));
+  assert.equal((await h.rpc('events/subscribe', args)).data.result.id, sub.data.result.id);
+  const unsubscribe = { ...args, delivery: { mode: 'webhook', url: args.delivery.url } };
+  assert.deepEqual((await h.rpc('events/unsubscribe', unsubscribe)).data.result, {});
+  assert((await h.rpc('events/list', {}, 'memory-token')).data.error);
+  const rejected = await h.rpc('events/subscribe', { ...args, arguments: { ownerId: 'forged' } });
+  assert.equal(rejected.data.error.code, -32602);
 });
