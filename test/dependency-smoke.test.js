@@ -113,8 +113,8 @@ test('real HTTP server serves the voice UI and rejects unauthenticated webhooks'
   assert.equal(app.outbound.length, 0, 'readiness checks must not send messages or write memory');
 });
 
-for (const answered of [false, true]) {
-  test(`actual agent records ${answered ? 'answered then ended' : 'no answer without starting voice'}`, async (t) => {
+for (const [answered, recipient] of [[false, 'yulia'], [true, 'yulia'], [true, 'other']]) {
+  test(`actual agent records ${answered ? 'answered then ended' : 'no answer without starting voice'} (${recipient})`, async (t) => {
     agents.initializeLogger({ pretty: false, level: 'silent' });
     const participant = { identity: 'test', attributes: { 'sip.callStatus': answered ? 'active' : 'ringing' } };
     const room = Object.assign(new EventEmitter(), { name: 'offline-test', isConnected: true, remoteParticipants: new Map([['test', participant]]) });
@@ -133,9 +133,16 @@ for (const answered of [false, true]) {
         waitForEnd: async () => ({ ended: true, reason: 'room_disconnected', identity: 'test' }),
         markEnded() {}, dispose() { disposed++; }
       }) }
-    }, { SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'test-only' });
+    }, { SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'test-only' }, { fetch: async (url, options) => {
+      if (url.startsWith('http://127.0.0.1:10000/internal/voice-tool')) {
+        assert.equal(JSON.parse(options.body).name, 'request_owner_access');
+        return Response.json({ ok: true, authenticated: false, approvalPending: true });
+      }
+      assert.ok(url.startsWith('https://database.invalid/'));
+      return Response.json(url.includes('/call_sessions?') && (!options.method || options.method === 'GET') ? [{ id: 'offline-session', telegram_user_id: '1087968824' }] : []);
+    } });
     await app.exports.default.entry({
-      job: { metadata: JSON.stringify({ instruction: 'Offline test', callSessionId: 'offline-session' }) },
+      job: { metadata: JSON.stringify({ instruction: 'Offline test', callSessionId: 'offline-session', source: 'telegram-lkcall', userId: '1087968824', voiceCallPlan: { recipient } }) },
       room, connect: async () => {}, waitForParticipant: async () => participant,
       addShutdownCallback() {}, shutdown() { jobShutdowns++; }
     });
@@ -148,6 +155,7 @@ for (const answered of [false, true]) {
     assert.equal(events.includes('call_answered'), answered);
     assert.equal(events.includes('call_ended'), answered);
     assert.equal(events.includes('no_answer'), !answered);
+    assert.equal(app.outbound.filter(row => row.url.includes('/internal/voice-tool')).length, Number(answered && recipient === 'yulia'), 'automatic button only for an answered owner call to herself');
     const statuses = app.outbound.filter(r => r.method === 'PATCH').map(r => r.body.status);
     assert.equal(statuses.at(-1), answered ? 'ended' : 'no_answer');
   });
@@ -185,16 +193,22 @@ test('short Telegram phrases use the configured model and current message', asyn
 test('actual inbound webhook uses dialogue context and attaches a passive observer', async (t) => {
   const express = (await import('express')).default;
   const inbound = await import('../inbound-voice.js');
-  let server, observed, accepted;
+  let server, observed, accepted, observerSocket;
   const wrapper = Object.assign(function () {
     const app = express(); const listen = app.listen.bind(app);
     app.listen = (...args) => { server = listen(...args); return server; }; return app;
   }, express);
   const app = await loadApplication('server.js', {
     express: { default: wrapper },
-    './inbound-voice.js': { ...inbound, observeRealtimeCall(options) { observed = options; return { socket: new EventEmitter() }; } }
+    './inbound-voice.js': { ...inbound, observeRealtimeCall(options) { observed = options; observerSocket = new EventEmitter(); return { socket: observerSocket }; } }
   }, { PORT: 0, TELEGRAM_TOKEN: 'test', OPENAI_API_KEY: 'fake', SUPABASE_URL: 'https://database.invalid', SUPABASE_KEY: 'fake', OPENAI_REALTIME_MODEL: 'gpt-realtime' }, {
     fetch: async (url, options) => {
+      if (url.includes('/rest/v1/agent_state?')) return Response.json([{ summary: JSON.stringify({ version: 1, telegramUserId: '987654321' }) }]);
+      if (url.endsWith('/sendMessage')) {
+        const body = JSON.parse(options.body);
+        assert.equal(body.chat_id, '987654321'); assert.equal(body.reply_markup.inline_keyboard[0][0].text, 'Это я — открыть память');
+        return Response.json({ ok: true, result: { message_id: 1 } });
+      }
       if (url.includes('/rpc/find_latest_outbound_call_by_phone')) return Response.json([{ id: 'old-call', instruction: 'Спроси, хорошо ли тебя слышно.' }]);
       if (url.startsWith('https://database.invalid/rest/v1/call_sessions') && options.method === 'POST') return Response.json([{ id: 'new-call' }]);
       if (url.includes('event_type=in.')) {
@@ -221,12 +235,17 @@ test('actual inbound webhook uses dialogue context and attaches a passive observ
   assert.equal(accepted.audio.input.turn_detection.silence_duration_ms, 800);
   assert.equal(accepted.audio.input.transcription.language, undefined);
   assert.equal(observed.callId, 'offline-call');
+  assert.equal(app.outbound.filter(row => row.url.endsWith('/sendMessage')).length, 0);
+  observerSocket.emit('open');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.outbound.filter(row => row.url.endsWith('/sendMessage')).length, 1, 'button arrives when the accepted call observer connects, without a spoken request');
   await observed.onRecord({ type: 'voice_user_transcript', role: 'user', text: 'Тестовая реплика.', interpretation: 'asr_may_differ_from_audio' });
   const saved = app.outbound.find(r => r.body?.[0]?.event_type === 'voice_user_transcript').body[0];
   assert.equal(saved.call_session_id, 'new-call');
   assert.equal(saved.normalized_phone, '380670000001');
   assert.equal(saved.stimulus, 'Тестовая реплика.');
   assert.equal(saved.metadata.ownerAuthenticated, false);
+  observerSocket.emit('close');
 });
 
 test('actual Telegram route rejects spoofing and restricts phone help to the bound owner', async (t) => {
@@ -437,7 +456,7 @@ test('help, status and liveness work without paid API calls; unsupported media g
   assert.equal(h.sent.length, 3); assert.match(h.sent[0].text, /\/voice/); assert.match(h.sent[1].text, /ещё не проверена/);
   assert.match(h.sent[2].text, /текст и фотографии/); assert.equal(h.api.length, 0);
   const health = await fetch(h.base + '/health'); assert.equal(health.status, 200);
-  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: SHARED_CORE_VERSION, phoneAccess: 'telegram_call_button_2026_11_10' });
+  assert.deepEqual(await health.json(), { ok: true, version: 'telegram_reliability_2026_11_10', core: SHARED_CORE_VERSION, phoneAccess: 'telegram_call_button_auto_2026_11_11' });
 });
 
 test('a failed memory write warns explicitly after the answer without repeating generation', async t => {

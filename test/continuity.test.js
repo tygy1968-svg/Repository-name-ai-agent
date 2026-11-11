@@ -42,7 +42,7 @@ test('archive, anchor and transition reads remain in the owner namespace and per
   assert.equal(packet.continuity.archives[0].archiveId, summary.archive_id);
   assert.equal(packet.continuity.transitions.length, 1);
   for (const table of ['chat_archive_anchors', 'chat_archive_summaries', 'kuzia_evolution']) assert.equal(requests.find(row => row.table === table).user, 'eq.yulia');
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
 });
 
 test('a fresh executor reloads the same continuity sources in Telegram and authenticated phone', async () => {
